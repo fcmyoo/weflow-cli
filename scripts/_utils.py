@@ -319,7 +319,15 @@ def create_engine(engine_type: str, api_key: str = '') -> AIEngine:
 
 
 def _custom_endpoint():
-    """读取 config.json 的 aiBaseUrl/aiModel; 未配置返回 (None, None)。"""
+    """读取自定义 OpenAI 兼容端点; 未配置返回 (None, None)。
+
+    优先级：环境变量 `WEFLOW_AI_BASE_URL` / `WEFLOW_AI_MODEL` > 配置 `aiBaseUrl` / `aiModel`。
+    环境变量先于配置，是为了"临时换端点做一次对照"时不改用户的持久配置——
+    改 config 会让所有走这条路的功能（日报摘要、概念生成…）一起改口径。
+    """
+    env_base = (os.environ.get('WEFLOW_AI_BASE_URL') or '').strip().rstrip('/')
+    if env_base:
+        return env_base, ((os.environ.get('WEFLOW_AI_MODEL') or '').strip() or 'deepseek-chat')
     try:
         with open(CONFIG_PATH, encoding='utf-8') as f:
             cfg = json.load(f)
@@ -331,8 +339,16 @@ def _custom_endpoint():
 
 
 def call_deepseek(prompt: str, api_key: str, max_tokens=2000, timeout=60) -> str:
-    """向后兼容：调用 DeepSeek API。"""
-    return DeepSeekEngine(api_key, timeout=timeout).chat(prompt, max_tokens=max_tokens)
+    """向后兼容：调用 DeepSeek API。
+
+    **配置了 `aiBaseUrl` 时走自定义 OpenAI 兼容端点**（302/中转站等）。
+    此前这里直接 new `DeepSeekEngine`，等于绕过了 `create_engine()` 对 `aiBaseUrl` 的支持——
+    表现是"改配置没生效、请求仍然发去 api.deepseek.com"，不报错，只是账单落在别处。
+    """
+    engine = create_engine('deepseek', api_key)
+    if timeout:
+        engine.timeout = timeout
+    return engine.chat(prompt, max_tokens=max_tokens)
 
 
 def call_ai(prompt: str, engine_type: str = 'local', api_key: str = '', max_tokens=2000) -> str:
@@ -695,6 +711,53 @@ RELEVANCE_NAMES = ['低', '中', '高']
 # 「有启发性」（正面评价），不是「没判断」。值不变更（改档位会动到下游的
 # 收录判据），只是把它写在一处，好让它可被搜索、可被讨论。
 DEFAULT_RELEVANCE = '中'
+
+
+def keep_daily_images(config=None, cli_flag=False) -> bool:
+    """日报生成完之后，要不要**保留**当天的 `images/` 目录。
+
+    默认 **False（删）**。理由：那个目录每天 0.6–1.3G（实测 11 天吃掉 9G），
+    而 `index.html` 与所有 md 里都**不引用**它（正文图片是 `mmbiz.qpic.cn` 的远程
+    URL），只有单篇阅读视图 `article.html` 通过 `.image_map.json` 用到。
+    在 59G 的机器上它把根分区填满过一次（100%，日报中途 EXIT=1）。
+
+    优先级：命令行 `--keep-images` > 配置 `dailyKeepImages` > 默认删。
+    """
+    if cli_flag:
+        return True
+    try:
+        cfg = config if config is not None else (load_config() or {})
+    except Exception:
+        return False
+    return str(cfg.get('dailyKeepImages') or '').strip().lower() in ('true', '1', 'yes', 'on')
+
+
+def cleanup_day_images(out_dir, keep: bool = False, config=None, cli_flag: bool = False) -> dict:
+    """删掉某一天的 `images/`（除非要求保留）。返回 `{'removed', 'bytes', 'kept'}`。
+
+    只删 `images/` 这一个目录：`.image_map.json` 与 `article.html` 都留着——
+    前者是小文件（远程 URL → 本地文件名），后者失去本地图会回退到远程 URL。
+    删之前统计字节数，好把「省了多少」写进日志；不然这件事永远无声无息。
+    """
+    import pathlib as _pathlib
+    import shutil as _shutil
+
+    root = _pathlib.Path(out_dir)
+    target = root / 'images'
+    if not target.is_dir():
+        return {'removed': 0, 'bytes': 0, 'kept': False, 'missing': True}
+    if keep or keep_daily_images(config, cli_flag):
+        return {'removed': 0, 'bytes': 0, 'kept': True}
+    files, size = 0, 0
+    for entry in target.rglob('*'):
+        if entry.is_file():
+            files += 1
+            try:
+                size += entry.stat().st_size
+            except OSError:
+                pass
+    _shutil.rmtree(target, ignore_errors=True)
+    return {'removed': files, 'bytes': size, 'kept': False}
 
 
 def output_root():

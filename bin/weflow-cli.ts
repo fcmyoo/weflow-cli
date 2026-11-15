@@ -1529,7 +1529,7 @@ const configurableKeys = [
   'assistantGroupRequireMention', 'assistantFastRoute', 'assistantPanelUser', 'quickReplyContacts',
   'skillDirs', 'skillDisabled',
   'dailySources', 'dailySourceCategories',
-  'dailyExcludeTopics', 'dailyAiEnabled', 'dailyMailTo',
+  'dailyExcludeTopics', 'dailyAiEnabled', 'dailyKeepImages', 'dailyMailTo',
   'wechatMediaDownload',
   'emoticonSeed',
 ] as const
@@ -6830,15 +6830,30 @@ program
         const dirs = Array.isArray(opts.dir) ? opts.dir : (opts.dir ? [opts.dir] : [])
         const args = [script, ...dirs.flatMap((d: string) => ['--dir', String(d)]),
           ...(opts.json ? ['--json'] : [])]
+        // 超时给足：实测 4.8 万页冷缓存要 101.7 秒（2026-11-11，真实 vault），
+        // 原来的 120 秒只够"刚好跑完"，再大一点或磁盘慢一点就会变成"执行超时或被终止"——
+        // 而用户看到的那句话完全没提示"是页面太多"，只会以为功能坏了。
+        const LINT_TIMEOUT_MS = 600_000
         try {
           const { stdout } = await execFileAsync(getPythonCommand(), args, {
-            timeout: 120_000, maxBuffer: 20 * 1024 * 1024, env: pythonProcessEnv(),
+            timeout: LINT_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024, env: pythonProcessEnv(),
           })
           process.stdout.write(stdout)
-        } catch (error) {
-          if (opts.json) console.log(JSON.stringify({ success: false, code: 'WIKI_LINT_FAILED', error: safeSubprocessError(error) }))
-          else console.error(chalk.red(`
-✗ ${safeSubprocessError(error)}`))
+        } catch (error: any) {
+          const timedOut = error?.killed === true || error?.signal === 'SIGTERM'
+          const hint = timedOut
+            ? `\n  可能是页面太多（超过 ${Math.round(LINT_TIMEOUT_MS / 1000)} 秒）。`
+              + '先用 --dir 缩小到某一个目录再试；\n  或直接跑脚本看进度：python scripts/wiki_lint.py --dir <目录>'
+            : ''
+          if (opts.json) {
+            console.log(JSON.stringify({
+              success: false, code: timedOut ? 'WIKI_LINT_TIMEOUT' : 'WIKI_LINT_FAILED',
+              error: safeSubprocessError(error),
+            }))
+          } else {
+            console.error(chalk.red(`
+✗ ${safeSubprocessError(error)}${hint}`))
+          }
           process.exit(1)
         }
       }))
@@ -7334,6 +7349,7 @@ program
   .option('--yes', '确认执行日报生成；JSON 模式需要此选项')
   .option('--no-ai', '关闭本次日报的所有 AI 处理')
   .option('--no-summary', '只判断不生成：不调 LLM 写摘要/标签/简报（主题与相关度仍由 Jev 判断），无需 DeepSeek key')
+  .option('--keep-images', '保留当天的 images/ 目录（**默认删**：每天 0.6–1.3G，而日报主页与 md 都不引用它，只有单篇阅读视图用得上）。等价配置 dailyKeepImages=true')
   .option('--prefetch-bodies [n]', '抓取之前先并发把当天正文抓进缓存（n=并发数，默认 8）：抓取阶段于是全部命中缓存、不再逐篇 sleep 8-12 秒（450 篇约 75 分钟 → 秒级）。对上游的请求次数不变，只是压进更短的时间窗')
   .option('--no-prefetch-bodies', '关闭并发预取正文（默认开启）')
   .option('--json', '输出机器可读的最终结果；运行日志写入 stderr')
@@ -7388,6 +7404,8 @@ program
       if (noAi) args.push('--no-ai')
       // 与 --no-ai 不同：这一条保留判断（Jev），只关掉 LLM 的文字生成。
       if (opts.noSummary && !noAi) args.push('--no-summary')
+      // 默认由 pipeline 在收尾时删掉当天的 images/；这条是"别删"的开关。
+      if (opts.keepImages) args.push('--keep-images')
       for (const source of opts.source || []) args.push('--source', source)
       // 外部源直通 pipeline：无本地库时也能出完整日报（Linux 的主要路径）
       for (const file of opts.articlesJson || []) args.push('--articles-json', file)

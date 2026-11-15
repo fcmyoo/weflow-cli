@@ -56,6 +56,10 @@
   且前者的新 `tid` 在后者中对应 0 行 —— 所以「stats 在涨」**不等于**「正文在更新」。
   完整说明与排查清单见 [SNS_GUIDE.md](SNS_GUIDE.md)。2026-11-03 补。
 
+- **助手会留一份本地对话流水**：`~/.weflow-cli/assistant_transcript/YYYY-MM-DD.jsonl`，
+  只追加、保留 7 天、目录 0700 / 文件 0600。用途是给「事实对账」留证据（D-150），
+  不参与推理；删掉它只会丢掉对账能力，不影响助手正常工作。2026-11-11 加。
+
 ## Purpose
 
 WeFlow CLI is a local-first command-line tool and MCP server for user-authorized WeChat data workflows: local chat queries and exports, official-account daily reading, favorites, knowledge workflows, and an optional local assistant.
@@ -682,6 +686,15 @@ separate process.** There is no plugin loader, no adapter registry and no public
 decision, not an unfinished chore - an in-process plugin would hold the same reach as the code it joins. `docs/EXTENDING.md`
 is the checklist for the in-repo path, including the two extension points where **nothing** will fail if you forget a
 step (the CLI's interactive-menu entry is the notable one).
+
+## 旁挂：LearnHarness 中文版（`learnharness-zh/`，2026-11-12）
+
+- **是什么**：把外部项目 [LearnHarness](https://github.com/amosblomqvist/learnharness)（本机学习智能体，Next.js + Electron，AGPL-3.0）包成中文可用的形态。**不引入它的源码**，只调它的 HTTP 接口、替换它源码里的界面文案；本目录代码独立、无新增依赖。
+- **为什么放在这个仓库**：它是"本地第二大脑"的另一条腿——weflow 管**你读过什么**，这套管**你学会了什么**，两者共用 `Wiki/Concepts` 的知识口径（下一步把 `lh graph` 的命题节点导成概念页）。
+- **能力**：11 个 CLI 命令（`health/models/list/show/graph/new/send/ask/watch/lesson/drill/review/clarify`，默认单行 JSON）、1 个 MCP stdio server（7 个工具：`lh_health/lh_lesson/lh_ask/lh_drill/lh_review/lh_list/lh_graph`）、中文教学法与提示词、UI 文案盘点与替换脚本。
+- **验证**：`node learnharness-zh/test/smoke.mjs` 用假实例（随机端口 + SSE 回放）跑通 CLI 与 MCP 全链路，7 项断言全绿；**未对真实 LearnHarness 实例做端到端验证**（本机没有跑它、也没有配模型），所以"能连上真实例"目前是接口契约层面的结论，不是实测。
+- **已知边界**：UI 汉化只覆盖 `zh/zh-map.json` 里的高频串（预演命中 122 处 / 36 个文件、盘点 468 条 / 84 个文件）；`lh graph` 未接入 weflow 概念页；LearnHarness 需单独安装并运行，本仓库不代管它的进程与模型配置。
+- **许可**：`learnharness-zh/` 自身与本仓库一致；`scripts/zh-apply.mjs` 改的是 AGPL 项目的源码，分发被改过的它的源码需遵守 AGPL。
 
 ## Related Documents
 
