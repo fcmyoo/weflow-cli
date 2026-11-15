@@ -25,6 +25,9 @@ CLI、MCP 与面板共用的业务实现。分为四个子目录：
 - `src/services/configService.ts`：配置读写，`ENCRYPTED_KEYS` 决定哪些键加密存储。改动五处见 Recipe B。
 - `src/services/pythonBridge.ts`：调用 `scripts/`，`runPythonJson` 解析脚本的 JSON 输出（`parseJsonFrom`）。
 - `src/panel/server.ts`：`STATIC_FILES` 白名单决定面板可取的静态资源。
+- `src/services/assistantMemory.ts`：助手三层记忆（L1 工作记忆 / L2 滚动摘要 / L3 长期事实），持久化 `~/.weflow-cli/assistant_memory.json`（v1.21.15 起）。设计见 `docs/ASSISTANT_MEMORY_PLAN.md`。
+- `src/services/assistantTranscript.ts`：原始对话流水（L1 底账），按天追加落盘、保留 7 天，不参与推理、只作对账证据。
+- `src/services/assistantReconcile.ts`：事实对账（离线 Dreaming 最小版）——拿每条事实的 `sourceQuote` 回流水里找原话，找得到标 verified、找不到标 not-in-transcript（**不删**，删错比留错贵）。
 
 ## 关键依赖与配置
 
@@ -55,6 +58,9 @@ CLI、MCP 与面板共用的业务实现。分为四个子目录：
 - `src/services/configService.ts`
 - `src/services/pythonBridge.ts`
 - `src/services/assistantService.ts`
+- `src/services/assistantMemory.ts`
+- `src/services/assistantTranscript.ts`
+- `src/services/assistantReconcile.ts`
 - `src/services/outboundSend.ts`
 - `src/core/wechatClient.ts`
 - `src/core/dbPathService.ts`
@@ -70,3 +76,4 @@ CLI、MCP 与面板共用的业务实现。分为四个子目录：
 
 - 2026-10-15：由 `/init-project` 首次生成。
 - 2026-10-30：随上游 v1.21.4 同步；复核所列服务文件与测试文件名均仍存在。
+- 2026-11-15：随上游同步；补助手记忆三层（`assistantMemory` / `assistantTranscript` / `assistantReconcile`，v1.21.15 起），设计见 `docs/ASSISTANT_MEMORY_PLAN.md`。

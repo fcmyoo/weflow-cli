@@ -85,6 +85,7 @@ graph TD
     A --> F["test"];
     A --> G["resources"];
     A --> H["docs（人工维护，无模块文档）"];
+    A --> I["learnharness-zh"];
     B --> B1["core / services / panel / utils"];
 
     click B "./src/CLAUDE.md" "查看 src 模块文档"
@@ -93,6 +94,7 @@ graph TD
     click E "./scripts/CLAUDE.md" "查看 scripts 模块文档"
     click F "./test/CLAUDE.md" "查看 test 模块文档"
     click G "./resources/CLAUDE.md" "查看 resources 模块文档"
+    click I "./learnharness-zh/README.md" "查看 learnharness-zh 说明"
 ```
 
 ### 模块索引
@@ -105,6 +107,7 @@ graph TD
 | Python 工作流 | `scripts/` | NT 数据读取、日报、知识卡、概念页、图谱、RAG | [scripts/CLAUDE.md](scripts/CLAUDE.md) |
 | 测试 | `test/` | node:test 与 Python unittest 回归测试 | [test/CLAUDE.md](test/CLAUDE.md) |
 | 随包资源 | `resources/` | 面板应用、吉祥物、原生 DLL、图谱页面库 | [resources/CLAUDE.md](resources/CLAUDE.md) |
+| 中文学习外壳 | `learnharness-zh/` | LearnHarness 中文版：CLI / MCP / 中文教学法与 UI 汉化工具链（不改上游源码） | [learnharness-zh/README.md](learnharness-zh/README.md) |
 | 文档 | `docs/` 与根目录 `*.md` | 人工维护，不生成模块级 CLAUDE.md | 见本文件顶部阅读清单 |
 
 ### 运行与开发
@@ -133,3 +136,4 @@ graph TD
 
 - 2026-10-15：由 `/init-project` 追加"项目索引"章节（模块结构图、模块索引、各栏目）并生成各模块 `CLAUDE.md`。上方人工维护内容未改动。
 - 2026-10-30：随上游 v1.21.4 同步（本文件的"项目索引"章节与各模块 `CLAUDE.md` 一并移植到新版基线）。
+- 2026-11-15：随上游 v1.21.15 后续 9 个提交同步；模块结构图与模块索引加入 `learnharness-zh/`（中文版学习外壳，不改上游源码）。

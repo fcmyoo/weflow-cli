@@ -14,7 +14,7 @@ Commander 命令注册、参数校验、交互式菜单。所有用户可见命�
 
 ## 对外接口
 
-- 命令共 146 处 `.command(` 调用（含子命令），以 `weflow-cli --help` 为准。
+- 命令共 147 处 `.command(` 调用（含子命令），以 `weflow-cli --help` 为准。
 - 交互式菜单 `showInteractiveMenu()` 与其 `switch (action)` 一一对应。
 - 约定：可被脚本或 AI 驱动的命令提供 `--json`；破坏性操作为 `--dry-run` 预览后 `--yes` 确认。
 
@@ -48,3 +48,4 @@ Commander 命令注册、参数校验、交互式菜单。所有用户可见命�
 
 - 2026-10-15：由 `/init-project` 首次生成。
 - 2026-10-30：随上游 v1.21.4 同步；`.command(` 计数由 114 更新为 138（由 `test/architecture-counts.test.ts` 钉住）。
+- 2026-11-15：随上游同步；`.command(` 计数由 146 更新为 147（守卫钉的是 ARCHITECTURE.md，本文件的数字靠本次审计校准）。

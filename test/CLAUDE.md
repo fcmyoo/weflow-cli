@@ -33,7 +33,8 @@ Node 与 Python 的回归测试，优先使用合成数据。TypeScript 测试�
 - CLI 与菜单：`cli-menu`、`json-surface`、`json-error-surface`、各 `*-cli`
 - 配置：`config-keys`、`config_keys_declared_test`
 - 面板：`panel-*`
-- 概念页与知识卡：`concept-dirs-agreement`、`chat_notes_test`、`compile_wiki_test`
+- 概念页与知识卡：`concept-dirs-agreement`、`chat_notes_test`、`compile_wiki_test`、`wiki_freshness_test`
+- 助手记忆三层（v1.21.15 起）：`assistant-memory`、`assistant-reconcile`、`assistant-transcript`
 - 打包与文档：`pack-contents`、`package-root`、`doc-links`、`decision-refs`
 
 本目录的文件总数（`*.test.ts` + `*_test.py`）与 `ARCHITECTURE.md`「代码边界」表里的数字一致，由 `test/architecture-counts.test.ts` 从磁盘数出来钉住——加一个测试文件后若忘了改文档，那条会红。
@@ -58,3 +59,4 @@ Node 与 Python 的回归测试，优先使用合成数据。TypeScript 测试�
 
 - 2026-10-15：由 `/init-project` 首次生成。
 - 2026-10-30：随上游 v1.21.4 同步；补充密钥缓存 / 数据库缓存 / PDF 笔记 / NT 附加库 / 表情解码五组新测试的说明。
+- 2026-11-15：随上游同步；测试分组补「助手记忆三层」与 `wiki_freshness_test`。

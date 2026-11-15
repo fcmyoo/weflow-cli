@@ -6,7 +6,7 @@
 
 耗时或依赖 Python 生态的工作流：NT 数据读取与解密、日报与报告、知识卡（文章 / 聊天 / 收藏 / 自写笔记）、概念页编译与体检、图谱页面、RAG 与语义搜索、面板立绘帧校验。
 
-约 82 个 `.py` 文件，另有 3 个 TypeScript 与 2 个 MJS 辅助脚本（`assistant_eval.ts`、`assistant_route_probe.ts`、`capture_favorite_schema.ts`、`graph3d_check.mjs`、`json_surface_probe.mjs`）等探针。
+约 85 个 `.py` 文件，另有 3 个 TypeScript 与 2 个 MJS 辅助脚本（`assistant_eval.ts`、`assistant_route_probe.ts`、`capture_favorite_schema.ts`、`graph3d_check.mjs`、`json_surface_probe.mjs`）等探针。
 
 ## 入口与启动
 
@@ -40,6 +40,8 @@
 - `test/pdf_notes_test.py`、`test/pdf_index_test.py`：PDF 笔记与 OCR 流水线（v1.20 起）。
 - `test/wechat_extras_test.py`：此前无人读取的 NT 库（general / session / emoticon / solitaire / bizchat）。
 - `test/wechat_emoticon_test.py`：表情解码，seed 从配置 → 日志 → 内存三级解析（v1.21.3 起不再要求微信在运行）。
+- `test/wiki_freshness_test.py`：知识库体检的「时效」检查（v1.21.15 起，停更检测）。
+- `test/jev_connection_retry_test.py`：连接层异常（RemoteDisconnected 等）必须标 retryable（v1.21.15 修复）。
 
 ## 常见问题 (FAQ)
 
@@ -58,6 +60,7 @@
 - `scripts/database_cache.py`、`scripts/manage_cache.py`（数据库缓存）
 - `scripts/pdf_notes.py`（PDF 笔记 / OCR）
 - `scripts/wechat_extras.py`（NT 附加库）
+- `scripts/fill_dangling.py`（悬空概念补页，**零模型**抽取式；v1.21.15 起）
 - `scripts/wechat_emoticon.py`（表情解码）
 - `scripts/data/`（数据子目录，本次未读取内容）
 
@@ -69,3 +72,4 @@
 
 - 2026-10-15：由 `/init-project` 首次生成。
 - 2026-10-30：随上游 v1.21.4 同步；`.py` 计数由约 60 更新为 79，补充五个新脚本与对应测试。
+- 2026-11-15：随上游同步；`.py` 计数由约 82 更新为 85，补 `fill_dangling.py`（悬空概念补页，零模型）与 `wiki_freshness_test.py`、`jev_connection_retry_test.py` 两条测试说明。
