@@ -362,14 +362,23 @@ def minimax_transcribe_wav(wav_path, key, model=MINIMAX_ASR_MODEL,
         audio = handle.read()
 
     def field(name, value):
+        # 每个字段自带 `--boundary` 前缀，所以 body **不要**再另起一个——
+        # 2026-11-16 真机实测：多加一个会让开头变成 `--b\r\n--b\r\n`（一个畸形
+        # 空 part），服务端报 400 "Error when parsing request"。
         return (b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n'
                 % (boundary.encode(), name.encode(), str(value).encode()))
 
-    body = (b'--%s\r\n' % boundary.encode()
-            + field('model', model)
+    #: 文件 part 的分隔符。**必须单独 % 替换**：2026-11-16 真机实测，把它并进
+    # 下面那串 `+` 拼接时，`%` 只作用于最后一个字面量，file part 的分隔符会以
+    # 字面 `--%s` 留在 body 里——服务端报 400 "Error when parsing request"，
+    # 而 `assertIn(b'name="file"')` 照样中（畸形分隔符不删内容）。
+    file_header = (b'--%s\r\nContent-Disposition: form-data; name="file"; '
+                   b'filename="voice.wav"\r\nContent-Type: audio/wav\r\n\r\n'
+                   % boundary.encode())
+
+    body = (field('model', model)
             + field('response_format', 'json')
-            + b'--%s\r\nContent-Disposition: form-data; name="file"; '
-              b'filename="voice.wav"\r\nContent-Type: audio/wav\r\n\r\n'
+            + file_header
             + audio + b'\r\n'
             + b'--%s--\r\n' % boundary.encode())
 

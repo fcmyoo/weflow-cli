@@ -382,6 +382,26 @@ class MiniMaxProtocolTests(unittest.TestCase):
         self.assertEqual(captured['headers'].get('Authorization'), 'Bearer mm-key')
         self.assertIn('multipart/form-data', captured['headers'].get('Content-type', ''))
 
+    def test_multipart结构合法(self):
+        """按分隔符切开必须恰好三个 part——只断言"部件存在"是不够的。
+
+        2026-11-16 真机实测的教训：body 开头多一个 `--boundary` 时，
+        `assertIn` 四个部件照样全中（重复分隔符不删内容），而服务端报
+        400 "Error when parsing request"。所以这里数 part 个数。
+        """
+        _text, captured = self._call({'text': '字'})
+        body = captured['body']
+        content_type = captured['headers']['Content-type']
+        boundary = content_type.split('boundary=')[1].strip('"').encode()
+        # 以 --boundary 切开：['', part1, part2, part3, '--\r\n']
+        chunks = body.split(b'--' + boundary)
+        self.assertEqual(len(chunks), 5,
+                         '应当是 3 个 part + 首尾；实际 %d 段：%r'
+                         % (len(chunks), [c[:30] for c in chunks]))
+        self.assertTrue(chunks[-1].startswith(b'--'), '结尾必须是闭合分隔符')
+        names = [c for c in chunks[1:4] if b'name=' in c]
+        self.assertEqual(len(names), 3, '三个 part 都要带 name')
+
     def test_multipart里四个部件齐整(self):
         _text, captured = self._call({'text': '字'}, language='yue')
         body = captured['body']
