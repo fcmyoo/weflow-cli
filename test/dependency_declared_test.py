@@ -45,6 +45,7 @@ ALLOWED_UNDECLARED = {
     'pilk': '语音格式转换，可选',
     'psutil': '3.x 密钥提取辅助，可选',
     'pywxdump': '3.x 密钥提取，可选',
+    'websockets': '云端语音转写（DashScope Paraformer），可选；在 requirements-voice.txt',
     'win32crypt': 'Windows DPAPI，仅 Windows 有意义',
 }
 

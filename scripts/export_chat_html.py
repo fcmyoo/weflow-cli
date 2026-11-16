@@ -1512,14 +1512,18 @@ def render_voice(local_id, content):
     cache = VOICE_STATE['cache']
     if blob is None or cache is None:
         return label
-    text = cache.get(wechat_voice.voice_key(blob))
+    text, provider = wechat_voice.lookup_transcript(cache, blob)
     if not text:
         return label
     # Labelled, not presented as the words themselves. Recognition of dialect
     # speech is approximate: an unlabelled transcript reads as a quote, and a
     # confidently wrong quote is worse than an obvious placeholder.
-    return (f'{label}<div class="msg-voice-text">'
-            f'<span class="voice-tag">机器转写·粤语欠准</span>{escape_html(text)}</div>')
+    # 标签随 provider 变：本机 small 模型的粤语是"说得通顺但内容是编的"，必须留
+    # 欠准警告；云端 Paraformer 是商用 ASR，再挂同一顶帽子反而是冤枉它。
+    caveat = ('<span class="voice-tag">机器转写·粤语欠准</span>'
+              if provider == 'local'
+              else '<span class="voice-tag">机器转写</span>')
+    return (f'{label}<div class="msg-voice-text">{caveat}{escape_html(text)}</div>')
 
 
 def render_location(content):
@@ -2839,7 +2843,7 @@ def main():
         if VOICE_STATE['map']:
             done = sum(
                 1 for blob in VOICE_STATE['map'].values()
-                if VOICE_STATE['cache'].get(wechat_voice.voice_key(blob)) is not None
+                if wechat_voice.lookup_transcript(VOICE_STATE['cache'], blob)[0] is not None
             )
             print(f"Voice: {len(VOICE_STATE['map'])} clip(s), {done} transcribed")
 

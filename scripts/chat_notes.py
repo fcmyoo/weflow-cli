@@ -330,6 +330,9 @@ VOICE_CACHE_DIR = wechat_voice.DEFAULT_CACHE_DIR
 # 不标的话，模型看到一段像正常文本的东西，就会把它当成事实原文——这与本仓库对未核验信息的一贯
 # 处理是同一条纪律（概念页上的 `verified: false`、卡片里的 `summary_by: card` 都是这个意思）。
 VOICE_LABEL = '[语音·本机转写·未校对]'
+#: 云端商用 ASR 的标签：不再挂"本机"与"未校对"——Paraformer 的中文/粤语质量
+#: 够进知识卡，而标签里留着过时的免责声明会让人忽略真正该核的那部分。
+VOICE_LABEL_CLOUD = '[语音·云端转写]'
 
 
 def attach_voice_transcripts(messages, voice_map, cache):
@@ -340,18 +343,24 @@ def attach_voice_transcripts(messages, voice_map, cache):
     里**（内容寻址，key 是音频的 md5，见 `wechat_voice.voice_key`），只因为没有东西去读它，
     全部白白丢掉。
 
-    **只读缓存，不在这里跑模型**：转写要加载 whisper、一句一两秒，那是另一条路的事
-    （`--transcribe-voice` 会替你调它）。缺的**返回给调用方**，好让"缺多少"是个可见的数字，
-    而不是悄悄少几条。
+    **只读缓存，不在这里跑模型**：转写要加载 whisper（或连云端），那是另一条路的事
+    （`wechat_voice.ensure_transcripts` 负责填缓存）。缺的**返回给调用方**，好让
+    "缺多少"是个可见的数字，而不是悄悄少几条。
+
+    缓存 key 按 provider 分命名空间（`wechat_voice.cache_key`）：同一条语音可能
+    本地与云端都转过，**优先读云端**——商用 ASR 与 small 模型的质量差距，
+    不值得为了"本地先跑过"而把差的那份喂给模型。
     """
     enriched = pending = 0
     for message in messages:
         if message.get('localType') != VOICE_TYPE:
             continue
         blob = voice_map.get(message.get('localId')) if voice_map else None
-        text = cache.get(wechat_voice.voice_key(blob)) if (blob and cache) else None
+        text, provider = (wechat_voice.lookup_transcript(cache, blob)
+                          if (blob and cache) else (None, ''))
         if text:
-            message['parsedContent'] = '%s %s' % (VOICE_LABEL, text)
+            label = VOICE_LABEL_CLOUD if provider == 'cloud' else VOICE_LABEL
+            message['parsedContent'] = '%s %s' % (label, text)
             enriched += 1
         else:
             pending += 1
@@ -491,19 +500,35 @@ def collect(out_root, days, limit, transcribe_voice=False, source='wechat'):
                     # 降级**要说出来**：静默退化等于让模型把 `[语音]` 当成"他说了个'语音'"
                     print('  语音映射读不了（%s），这个会话的语音按占位符处理' % str(error)[:70],
                           file=sys.stderr)
-                if transcribe_voice and voice_map:
+                if voice_map:
                     # `ensure_transcripts` 要的是**字典**（它自己 `.items()`）；只补窗口内缺的那些，
                     # 已有转写它会自己跳过（缓存即进度，中断了再跑接着来）。
                     wanted = {m.get('localId'): voice_map.get(m.get('localId'))
                               for m in in_window if m.get('localType') == VOICE_TYPE}
                     wanted = {k: v for k, v in wanted.items() if v}
                     if wanted:
-                        # 本地 whisper：慢、吃 CPU，所以是显式的开关，不是默认行为
-                        done, already, failed = wechat_voice.ensure_transcripts(
-                            wanted, VOICE_CACHE_DIR,
-                            log=lambda line: print('    ' + line, file=sys.stderr))
-                        print('  语音转写: 新识别 %d 条、已有 %d 条、失败 %d 条（本地模型，未出网）'
-                              % (done, already, failed), file=sys.stderr)
+                        # 语音转写的三条路（2026-11-16 起）：
+                        #   有 dashscopeApiKey → 云端 Paraformer，一条几秒，**默认就跑**
+                        #     （质量远好于本机 small 模型——那个会把方言说得通顺但内容是编的）；
+                        #   没 key + --transcribe-voice → 本机 Whisper（慢、吃 CPU，显式 opt-in）；
+                        #   没 key 也没 flag → 不动，说清差什么。
+                        # 出网边界：云端转写随 chat-notes 的 --yes 一起确认（那条确认的
+                        # 就是"把这些材料发给 AI"），key 从配置解密、不进命令行参数。
+                        from _utils import get_dashscope_key
+                        dashscope_key = get_dashscope_key(config)
+                        if not dashscope_key and not transcribe_voice:
+                            print('    %d 条语音未转写：配 dashscopeApiKey 走云端'
+                                  '（weflow-cli config set dashscopeApiKey "..."），'
+                                  '或加 --transcribe-voice 用本机 Whisper' % len(wanted),
+                                  file=sys.stderr)
+                        else:
+                            done, already, failed = wechat_voice.ensure_transcripts(
+                                wanted, VOICE_CACHE_DIR, provider='auto',
+                                dashscope_key=dashscope_key,
+                                log=lambda line: print('    ' + line, file=sys.stderr))
+                            where = '云端模型，已出网' if dashscope_key else '本地模型，未出网'
+                            print('  语音转写: 新识别 %d 条、已有 %d 条、失败 %d 条（%s）'
+                                  % (done, already, failed, where), file=sys.stderr)
                 enriched, pending = attach_voice_transcripts(in_window, voice_map, voice_cache)
                 voice_total['enriched'] += enriched
                 voice_total['pending'] += pending

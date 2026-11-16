@@ -853,13 +853,37 @@ HTML 里放不出语音：微信语音是 **SILK v3** 格式，浏览器不支�
 
 **它是独立的、可断点续跑的一步，不在导出过程里。** 导出只读转写缓存；缓存没有的语音显示为 `[语音 6″]`。这样可以随时跑、随时停，跑过一遍就永久命中（按语音内容的 md5 缓存，同一条语音被转发到别处也只识别一次）。
 
+**两条转写路，默认自动选**（`--provider auto|cloud|local`）：
+
+| | 云端（推荐） | 本机 |
+| --- | --- | --- |
+| 引擎 | DashScope Paraformer-realtime-v2（商用 ASR） | faster-whisper（粤语微调 small） |
+| 质量 | 中文/粤语商用级 | 方言**说得通顺但内容是编的**，见下方实测 |
+| 速度 | 一条几秒 | 0.07 秒/条（GPU）～2 秒/条（CPU） |
+| 出网 | **音频发给阿里云** | 不出网 |
+| 前提 | `dashscopeApiKey` | `requirements-voice.txt` + 下载模型 |
+| 缓存 | `cloud-<md5>`（独立命名空间） | `<md5>` |
+
+**配了 key 就走云端，不用加任何参数**：
+
+```powershell
+weflow-cli config set dashscopeApiKey "sk-..."
+python scripts/wechat_voice.py --db "<message_0.db>" --key <key> --salt <salt> `
+  --passphrase <passphrase> --talker "<会话id>" --cache-dir "output\.voice-cache"
+# 强制某一条路：--provider cloud / --provider local
+# 语言提示默认 zh,yue（普通话+粤语）；改：--hints zh,en
+```
+
+`chat-notes` 出卡时同理：有 key 就自动用云端补语音转写（随 `--yes` 一起确认出网），
+没有 key 又不肯跑本机时，会明确说"差什么"，不静默跳过。
+
 安装（可选，较重）：
 
 ```powershell
 python -m pip install -r requirements-voice.txt
 ```
 
-下载模型。**这一步对粤语是必须的**：原版 Whisper 遇到粤语会输出通顺但完全是编造的普通话——看着像真句子，实际什么都没说过，比不转写更危险。粤语微调版才转得出真正的粤语：
+下载模型。**走本机转写时，这一步对粤语是必须的**（云端路不需要）：原版 Whisper 遇到粤语会输出通顺但完全是编造的普通话——看着像真句子，实际什么都没说过，比不转写更危险。粤语微调版才转得出真正的粤语：
 
 ```powershell
 $env:HF_ENDPOINT = "https://hf-mirror.com"; $env:HF_HUB_DISABLE_XET = "1"
@@ -895,9 +919,14 @@ python scripts/wechat_voice.py --db "<message_0.db>" --key <key> --salt <salt> `
 > 音频质量（峰值/RMS/过零率均为正常语音特征）、模型置信度（`avg_logprob` 中位
 > -0.25，模型对自己输出的内容很有把握——这恰恰说明它错得自信）。
 >
-> 因此导出的每条转写都标注「机器转写·粤语欠准」，页脚也写明**不可作为原话引用**。
+> 因此导出的每条**本机**转写都标注「机器转写·粤语欠准」，页脚也写明**不可作为原话引用**。
 > 需要确证时以录音为准。若某个会话不需要转写，删掉输出目录下的 `.voice-cache`
 > 即可，导出会退回只显示 `[语音 N″]`。
+>
+> **云端 Paraformer 不受这一节限制**：商用 ASR 对粤语的识别质量足够进知识卡，
+> 所以它的标签只有「机器转写」（`[语音·云端转写]`），不挂"粤语欠准"的帽子。
+> 两条路的缓存分开存（`cloud-<md5>` vs `<md5>`），同一条语音两条路都转过时
+> **优先展示云端那份**。
 
 实测对比（同一条粤语语音）：
 

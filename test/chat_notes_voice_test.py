@@ -6,6 +6,7 @@
 没有；所以这里用手写夹具把两件事分开：给了转写就必须用上，没给就必须原样不动。
 """
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -98,6 +99,189 @@ class VoiceWiringTests(unittest.TestCase):
         self.assertTrue(cn.VOICE_LABEL.startswith('[语音'))
         self.assertIn('未校对', cn.VOICE_LABEL)
         self.assertEqual(cn.VOICE_TYPE, 34)
+
+
+class ProviderNamespaceTests(unittest.TestCase):
+    """云端/本地两条转写路的缓存命名空间与优先级。
+
+    为什么值得钉：两条路的文字质量不同（云端商用 ASR vs 本机 small 模型），
+    混在同一个 key 下会让"谁转的"不可知——而本机那条的失败模式是**说得通顺但
+    内容是编的**，被当成事实引用时比空结果更贵。
+    """
+
+    def test_云端key带前缀_本地key保持原样(self):
+        blob = b'\x02SILK' + b'p' * 40
+        self.assertTrue(wv.cache_key(blob, 'cloud').startswith('cloud-'))
+        self.assertEqual(wv.cache_key(blob, 'local'), wv.voice_key(blob),
+                         '本地 key 必须保持原样——老缓存不能因为加了云端就失效')
+
+    def test_两条路都转过时优先读云端(self):
+        blob = b'\x02SILK' + b'q' * 40
+        cache = FakeCache({wv.cache_key(blob, 'cloud'): '云端认的字',
+                           wv.cache_key(blob, 'local'): '本机认的字'})
+        text, provider = wv.lookup_transcript(cache, blob)
+        self.assertEqual((text, provider), ('云端认的字', 'cloud'))
+
+    def test_只有本地时回退本地(self):
+        blob = b'\x02SILK' + b'r' * 40
+        cache = FakeCache({wv.cache_key(blob, 'local'): '本机认的字'})
+        text, provider = wv.lookup_transcript(cache, blob)
+        self.assertEqual((text, provider), ('本机认的字', 'local'))
+
+    def test_都没有时返回空(self):
+        text, provider = wv.lookup_transcript(FakeCache({}), b'\x02SILK' + b's' * 40)
+        self.assertEqual((text, provider), (None, ''))
+
+    def test_auto_有key走云端_没key回本地(self):
+        self.assertEqual(wv.resolve_provider('auto', 'sk-x'), ('cloud', '检测到 dashscopeApiKey'))
+        provider, _ = wv.resolve_provider('auto', '')
+        self.assertEqual(provider, 'local')
+
+    def test_显式指定压过自动判断(self):
+        self.assertEqual(wv.resolve_provider('local', 'sk-x')[0], 'local',
+                         '显式 local 不许因为有 key 就被送去出网')
+        self.assertEqual(wv.resolve_provider('cloud', '')[0], 'cloud')
+
+
+class CloudLabelTests(unittest.TestCase):
+    """云端转写挂云端的标签，本机的挂"未校对"——标签错了比没有标签更误导。"""
+
+    def test_只有云端条目时用云端标签(self):
+        blob = b'\x02SILK' + b'c' * 40
+        cache = FakeCache({wv.cache_key(blob, 'cloud'): '商用识别结果'})
+        messages = [voice(1541, blob)]
+        enriched, pending = cn.attach_voice_transcripts(messages, {1541: blob}, cache)
+        self.assertEqual((enriched, pending), (1, 0))
+        self.assertIn('商用识别结果', messages[0]['parsedContent'])
+        self.assertIn(cn.VOICE_LABEL_CLOUD, messages[0]['parsedContent'])
+        self.assertNotIn(cn.VOICE_LABEL, messages[0]['parsedContent'])
+
+    def test_两条路都有时用云端那份与云端标签(self):
+        blob = b'\x02SILK' + b'd' * 40
+        cache = FakeCache({wv.cache_key(blob, 'cloud'): '云端字',
+                           wv.cache_key(blob, 'local'): '本机字'})
+        messages = [voice(1542, blob)]
+        cn.attach_voice_transcripts(messages, {1542: blob}, cache)
+        self.assertIn('云端字', messages[0]['parsedContent'])
+        self.assertNotIn('本机字', messages[0]['parsedContent'])
+
+
+class FakeWebSocket:
+    """按脚本应答的假 WebSocket：验证协议解析，不联网。
+
+    `script` 是服务端事件序列（dict 或 bytes）；`sent` 记录客户端发出去的
+    文本帧，供断言 run-task / finish-task 的报文形状。
+    """
+
+    def __init__(self, script, sent):
+        self.script = list(script)
+        self.sent = sent
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def recv(self):
+        item = self.script.pop(0)
+        return item if isinstance(item, bytes) else json.dumps(item, ensure_ascii=False)
+
+
+def _event(name, **fields):
+    header = {'task_id': 't', 'event': name}
+    header.update(fields)
+    return {'header': header, 'payload': fields.get('payload', {})}
+
+
+def _sentence(text, end=True):
+    return _event('result-generated',
+                  payload={'output': {'sentence': {'text': text,
+                                                   'sentence_end': end,
+                                                   'heartbeat': False}}})
+
+
+class CloudProtocolTests(unittest.TestCase):
+    """云端 Paraformer 的协议解析：报文、事件取舍、失败传播。
+
+    协议是 2026-11-16 按官方文档对的，错一处就是"转写全是空的"或"连不上却
+    报成功"——所以这里用假 socket 把四个关键点钉住。
+    """
+
+    def _run(self, script):
+        import asyncio
+        import wave
+        import tempfile
+        import unittest.mock as mock
+
+        sent = []
+        fake = FakeWebSocket(script, sent)
+
+        async def fake_connect(*args, **kwargs):
+            return fake
+
+        # `async with websockets.connect(...)`：connect 的返回值必须是异步上下文
+        # 管理器（websockets≥14 的 Connect 两者都是），所以 mock 直接返回假 socket
+        # 而不是协程——协程没有 __aenter__。
+        def sync_connect(*args, **kwargs):
+            return fake
+
+        # 造一个 16kHz 单声道 16bit 的短 WAV（协议要求 format=pcm，采样率从文件头读）
+        tmp = tempfile.mkdtemp(prefix='wv-test-')
+        wav_path = os.path.join(tmp, 'a.wav')
+        with wave.open(wav_path, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b'\x00\x00' * 1600)
+        try:
+            with mock.patch('websockets.connect', sync_connect):
+                return wv.cloud_transcribe_wav(wav_path, 'sk-test'), sent
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_只收句尾结果_中间结果与心跳不计入(self):
+        text, sent = self._run([
+            _event('task-started'),
+            _sentence('第一句中间态', end=False),      # 中间结果：会被下一句覆盖
+            _event('result-generated', payload={'output': {'sentence': {
+                'text': '', 'heartbeat': True, 'sentence_end': False}}}),  # 心跳：跳过
+            _sentence('第一句'),
+            _sentence('第二句'),
+            _event('task-finished'),
+        ])
+        self.assertEqual(text, '第一句第二句')
+
+    def test_run_task报文形状(self):
+        _text, sent = self._run([_event('task-started'), _event('task-finished')])
+        texts = [s for s in sent if isinstance(s, str)]
+        run_task = json.loads(texts[0])
+        header = run_task['header']
+        self.assertEqual(header['action'], 'run-task')
+        self.assertEqual(header['streaming'], 'duplex')
+        payload = run_task['payload']
+        self.assertEqual(payload['model'], 'paraformer-realtime-v2')
+        self.assertEqual(payload['parameters']['format'], 'pcm')
+        self.assertEqual(payload['parameters']['sample_rate'], 16000)
+        self.assertEqual(payload['parameters']['language_hints'], ['zh', 'yue'])
+
+    def test_服务端失败要抛_不静默当空(self):
+        with self.assertRaises(RuntimeError):
+            self._run([_event('task-started'),
+                       _event('task-failed', error_code='CLIENT_ERROR',
+                              error_message='request timeout')])
+
+    def test_finish_task在音频之后发(self):
+        _text, sent = self._run([_event('task-started'), _event('task-finished')])
+        texts = [s for s in sent if isinstance(s, str)]
+        self.assertEqual(json.loads(texts[-1])['header']['action'], 'finish-task')
+        # 音频是二进制帧，排在两条文本指令之间
+        self.assertTrue(any(isinstance(s, (bytes, bytearray)) for s in sent),
+                        'PCM 必须以二进制帧发送')
 
 
 if __name__ == '__main__':
