@@ -248,15 +248,17 @@ def worth_a_card(messages, chars, min_messages=MIN_MESSAGES_FOR_CARD,
 def within_window(messages, cutoff):
     """窗口内、且**方向明确**的消息。
 
-    `get_messages` 只能给"最近 N 条"，没有时间区间参数，所以窗口要在这里自己筛。
-    方向为 `None` 的（`isSend` 缺失）也丢掉：这一行的标签是「我」还是对方全靠它，
+    `get_messages` 有 `from_time`/`to_time` 可下推 SQL（见 `fetch_all_messages`），
+    这里的 `cutoff` 与那两道窗口是同一个值；仍然在本进程再筛一遍，是因为
+    `isSend` 缺失的方向判别只能在这里做，以及**下推失败时要能被发现**。
+    方向为 `None` 的（`isSend` 缺失）丢掉：这一行的标签是「我」还是对方全靠它，
     拿不准的话那一行就只能瞎标——宁可少一条，不要给模型的材料里混一句标错的。
     """
     return [m for m in messages
             if int(m.get('createTime') or 0) >= cutoff and m.get('isSend') is not None]
 
 
-def fetch_all_messages(conns, talker, name_map, own_wxid):
+def fetch_all_messages(conns, talker, name_map, own_wxid, from_time=None, shard_report=None):
     """**把一个会话的消息取完**（分页），返回 `(messages, truncated)`。
 
     `get_messages` 是"最近 N 条 + offset"的形式，所以一页一页往回翻直到取空。
@@ -265,12 +267,27 @@ def fetch_all_messages(conns, talker, name_map, own_wxid):
 
     为什么非要取完：用户的要求是"同一个群聊必须在同一个上下文"。切块省事，但模型
     看不到前因后果，写出来的时间线和人物关系会失真。
+
+    `from_time`：下推给 SQL 的窗口下界（`get_messages` 的 `from_time`，含端点）。
+    **只有调用方随后会用 `within_window` 筛掉更早的消息时才传**——那意味着翻旧页
+    纯属白翻：本机实测 offset 分页的页延迟随深度线性恶化（0→1.8s、2 万→14.1s、
+    4 万→14.8s），一个 6 万条的大群翻完要几分钟到十几分钟。窗口下推后每页都落在
+    区间内，代价与窗口大小而不是与会话总长成正比。
+    语义保持：`within_window` 的判据是 `createTime >= cutoff`，与 `from_time` 的
+    "inclusive lower bound" 逐字一致；窗口内超过 `MAX_MESSAGES_PER_CONVERSATION`
+    时 `truncated` 照旧成立（截的是窗口内最新的那段，与从前截全量历史再筛相比
+    只会更完整，不会更少）。
+
+    `shard_report`：传一个 list 进去，`get_messages` 会把每个分片的读取结果追加进来。
+    窗口查询可能被某个分片拒绝（表无 `create_time` → `WINDOW_UNAVAILABLE`），
+    那种分片的消息会**整片缺失**——必须让调用方看得见，不能静默少一锅数据。
     """
     out, offset = [], 0
     while len(out) < MAX_MESSAGES_PER_CONVERSATION:
         page = nt_decrypt.get_messages(
             conns, talker, NOTE_MESSAGES, offset=offset,
-            name_map=name_map, own_wxid=own_wxid).get('messages') or []
+            name_map=name_map, own_wxid=own_wxid,
+            from_time=from_time, shard_report=shard_report).get('messages') or []
         if not page:
             break
         out.extend(page)
@@ -445,8 +462,20 @@ def collect(out_root, days, limit, transcribe_voice=False, source='wechat'):
         voice_total = {'enriched': 0, 'pending': 0}
         passphrase = decrypt_lock(config.get('favPassphrase') or config.get('decryptKey') or '')
         for item in picked:
+            # 窗口下推：`within_window` 反正只要 cutoff 之后的，就别再翻旧页
+            # （offset 分页越翻越慢，见 `fetch_all_messages` 的说明）。
+            shard_report = []
             messages, truncated = fetch_all_messages(conns, item['talker'], name_map,
-                                                     config.get('wxid', ''))
+                                                     config.get('wxid', ''),
+                                                     from_time=cutoff,
+                                                     shard_report=shard_report)
+            refused = [r for r in shard_report if r.get('reason') == 'WINDOW_UNAVAILABLE']
+            if refused:
+                # 窗口查询被分片拒绝 ⇒ 那片的消息整体缺席。卡片会**少一锅数据**
+                # 而不报错，所以必须在这里说出来（chat-notes 的纪律：宁可吵，不要静默）。
+                print('  警告：%d 个消息分片不支持窗口查询（表无 create_time），'
+                      '%s 的消息可能不完整' % (len(refused), item['name']),
+                      file=sys.stderr)
             in_window = within_window(messages, cutoff)
             if not in_window:
                 continue
