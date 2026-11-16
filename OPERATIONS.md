@@ -888,6 +888,21 @@ python scripts/wechat_voice.py --db "<message_0.db>" --key <key> --salt <salt> `
 python -m pip install -r requirements-voice.txt
 ```
 
+> **Windows 上 `pilk` 从源码编译的三个坑**（2026-11-16 本机实测，VS 2022 +
+> Windows SDK 10.0.26100）：PyPI 无预编译轮子，`distutils` 靠读注册表找 SDK
+> 路径，注册表被安全软件挡住时报的却是别的错——逐个症状：
+> 1. `fatal error C1083: 打不开 float.h` → UCRT 头没找到；
+> 2. `LINK fatal error LNK1104: kernel32.lib` → SDK lib 没找到；
+> 3. `LINK fatal error LNK1158: 无法运行 rc.exe` → SDK bin 不在 PATH。
+> 解法是把路径显式喂给工具链（版本号换成自己机器上的）：
+> ```powershell
+> $env:INCLUDE = "C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um;C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared"
+> $env:LIB = "C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
+> $env:PATH = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64;$env:PATH"
+> python -m pip install -r requirements-voice.txt
+> ```
+> 云端路（MiniMax）**不需要 pilk**——stdlib urllib 直传，只有本机 Whisper 兜底才要。
+
 下载模型。**走本机转写时，这一步对粤语是必须的**（云端路不需要）：原版 Whisper 遇到粤语会输出通顺但完全是编造的普通话——看着像真句子，实际什么都没说过，比不转写更危险。粤语微调版才转得出真正的粤语：
 
 ```powershell
