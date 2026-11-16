@@ -6,17 +6,20 @@
 # `pilk` decodes WeChat's SILK v3 audio, which neither browsers nor ffmpeg
 # can decode - that part is always local.
 #
-# Two recognition backends (see OPERATIONS.md, 「语音消息」):
+# Two cloud recognition engines (see OPERATIONS.md, 「语音消息」), plus a
+# local fallback. Auto-selection prefers MiniMax, then DashScope:
 #
-#   Cloud (default when a DashScope key is configured): `websockets` only.
-#     DashScope Paraformer-realtime-v2 - commercial-quality Chinese/Cantonese
-#     ASR, a few seconds per clip, audio leaves the machine. The key is read
-#     from the CLI config (`dashscopeApiKey`), never from command arguments.
+#   MiniMax (asr-1.0): **zero extra dependencies** - a single multipart POST
+#     built with stdlib urllib. Commercial-quality Chinese/Cantonese ASR,
+#     seconds per clip, audio leaves the machine. Key: `minimaxApiKey`.
+#
+#   DashScope (paraformer-realtime-v2): needs `websockets` (below).
+#     Commercial-quality ASR over a WebSocket protocol. Key: `dashscopeApiKey`.
 #
 #   Local fallback: `faster-whisper` on-device. Nothing leaves the machine, but
 #     the small model gets dialects/Cantonese *confidently wrong* - fluent text
 #     that says something never said. The model is fetched separately
-#     (see OPERATIONS.md). Only opt into this explicitly (`--provider local`
+#     (see OPERATIONS.md). Only opt into this explicitly (`--engine local`
 #     or `--transcribe-voice`); it is slow and CPU-heavy.
 #
 # On an NVIDIA GPU, also install the CUDA runtime wheels the recognition

@@ -26,7 +26,8 @@ sys.path.insert(0, str(SCRIPTS))
 # （test_…same_as_the_ts_list）比对两边集合相等。
 ENCRYPTED_KEYS = {
     'decryptKey', 'decryptKey3x', 'ntKey', 'contactKey', 'wechatOcToken',
-    'wereadApiKey', 'deepseekApiKey', 'typesafeApiKey', 'dashscopeApiKey', 'snsKey',
+    'wereadApiKey', 'deepseekApiKey', 'typesafeApiKey', 'dashscopeApiKey',
+    'minimaxApiKey', 'snsKey',
     'favKey', 'favPassphrase', 'openrouterApiKey',
 }
 # 允许直接读的文件：解密助手就住在这里。

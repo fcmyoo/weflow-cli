@@ -1512,16 +1512,16 @@ def render_voice(local_id, content):
     cache = VOICE_STATE['cache']
     if blob is None or cache is None:
         return label
-    text, provider = wechat_voice.lookup_transcript(cache, blob)
+    text, engine = wechat_voice.lookup_transcript(cache, blob)
     if not text:
         return label
     # Labelled, not presented as the words themselves. Recognition of dialect
     # speech is approximate: an unlabelled transcript reads as a quote, and a
     # confidently wrong quote is worse than an obvious placeholder.
-    # 标签随 provider 变：本机 small 模型的粤语是"说得通顺但内容是编的"，必须留
-    # 欠准警告；云端 Paraformer 是商用 ASR，再挂同一顶帽子反而是冤枉它。
+    # 标签随引擎变：本机 small 模型的粤语是"说得通顺但内容是编的"，必须留
+    # 欠准警告；两家云端商用 ASR（MiniMax / DashScope）再挂同一顶帽子是冤枉它们。
     caveat = ('<span class="voice-tag">机器转写·粤语欠准</span>'
-              if provider == 'local'
+              if engine == 'local'
               else '<span class="voice-tag">机器转写</span>')
     return (f'{label}<div class="msg-voice-text">{caveat}{escape_html(text)}</div>')
 

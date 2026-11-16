@@ -5,27 +5,29 @@ WeChat 4.x keeps voice payloads in `media_*.db` under `VoiceInfo.voice_data`,
 encoded as SILK v3 (a one-byte length prefix, then `#!SILK_V3`). Browsers
 cannot play SILK and ffmpeg has no SILK decoder, so a chat export has nothing
 to show for a voice message; the audio is decoded with `pilk` and transcribed
-with either backend below.
+with one of the engines below.
 
-Two recognition backends (`--provider auto|cloud|local`):
+Recognition engines (`--engine auto|minimax|dashscope|local`):
 
-- **Cloud (default when a DashScope key is configured)** - DashScope
-  Paraformer-realtime-v2. Commercial-quality Chinese/Cantonese ASR, a few
-  seconds per clip. This is the recommended path: the local small model gets
-  dialects confidently wrong, and a fluent wrong sentence is worse than an
-  empty one because it gets quoted as fact downstream.
+- **MiniMax** (`asr-1.0`, preferred when its key is configured) - commercial
+  ASR over a single multipart POST that takes the local file directly. The
+  user picked this one over DashScope on 2026-11-16.
+- **DashScope** (`paraformer-realtime-v2`) - commercial ASR over a WebSocket
+  protocol. Kept as the second option: the two services get the same dialect
+  clip wrong in different ways, and a switchable engine is one more chance
+  not to quote a fabrication as fact.
 - **Local** - `faster-whisper` on-device. Nothing leaves the machine. The
   default model is a Cantonese fine-tune, chosen because stock Whisper
   answers Cantonese with fluent-looking Mandarin nonsense. See OPERATIONS.md
   for how to fetch it. Slow and CPU-heavy: opt in explicitly.
 
-Both paths fill the same content-addressed cache, and the exporter only reads
+All paths fill the same content-addressed cache, and the exporter only reads
 it. That makes the pass resumable, re-runnable, and free to repeat once it
-has been paid for once. Cloud entries are namespaced (`cloud-<digest>`) so a
-transcript's origin is always knowable - see `cache_key`.
+has been paid for once. Entries are namespaced per engine (`ENGINE_PREFIX`)
+so a transcript's origin is always knowable - see `cache_key`.
 
-Audio leaves the machine only on the cloud path, and only when a DashScope
-key is configured; the key is read from the CLI config, never from argv.
+Audio leaves the machine only on the cloud paths, and only when a key is
+configured; keys are read from the CLI config, never from argv.
 """
 import hashlib
 import json
@@ -120,26 +122,31 @@ def voice_key(blob):
     return hashlib.md5(blob).hexdigest()
 
 
-def cache_key(blob, provider='local'):
-    """Provider-namespaced cache key for a voice payload.
+#: 转写引擎。`auto` 按下面的优先序挑；两个云端引擎都配了 key 时先 MiniMax
+#: （用户在两家之间明确选了它；想换序用 `--engine` 或配置 `voiceAsrEngine`）。
+ENGINES = ('auto', 'minimax', 'dashscope', 'local')
+#: 引擎 → 缓存 key 前缀。**必须按引擎分**：不同引擎的文字质量不同，混在一个 key 下
+#: 会让"这条转写是谁转的"不可知——而本机那条的失败模式是说得通顺但内容是编的。
+#: 本地用裸 digest（老缓存不失效）。
+ENGINE_PREFIX = {'dashscope': 'dashscope-', 'minimax': 'minimax-', 'local': ''}
 
-    云端是 `cloud-<digest>`，本地是裸 `<digest>`（老缓存不失效）。两条路质量不同，
-    必须分开放——混在一个 key 下，谁都不知道一条转写是商用 ASR 出的还是 small
-    模型出的，而后者会把方言说得通顺但内容是编的。
-    """
-    return ('cloud-' if provider == 'cloud' else '') + voice_key(blob)
+
+def cache_key(blob, engine='local'):
+    """Engine-namespaced cache key for a voice payload."""
+    return ENGINE_PREFIX.get(engine, '') + voice_key(blob)
 
 
 def lookup_transcript(cache, blob):
-    """Read a cached transcript for `blob`, preferring the cloud entry.
+    """Read a cached transcript for `blob`, preferring cloud engines.
 
-    返回 (text, provider)；都没有时 text 为 None。**先云端后本地**：同一条语音
-    两条路都转过时（本地先跑过、后来配了 key），读的人该看到质量更好的那份。
+    Returns (text, engine); (None, '') when nothing is cached. Preference
+    order is MiniMax, then DashScope, then local - all three beat nothing,
+    and either cloud engine beats the local small model.
     """
-    for provider in ('cloud', 'local'):
-        text = cache.get(cache_key(blob, provider))
+    for engine in ('minimax', 'dashscope', 'local'):
+        text = cache.get(cache_key(blob, engine))
         if text is not None:
-            return text, provider
+            return text, engine
     return None, ''
 
 
@@ -316,6 +323,84 @@ def transcribe_wav(wav_path, model, beam_size=1, language=DEFAULT_LANGUAGE):
 # 非实时那套 REST API 只收公网 URL、明确不支持 base64 与本地流，所以不走。
 # ============================================================================
 
+# ============================================================================
+# 云端转写（MiniMax speech_to_text，asr-1.0）
+#
+# 与 DashScope 那条并存，按 key 自动挑（都配了先 MiniMax，见 ENGINES 的注释）。
+# 为什么值得有第二条：两家对同一条方言语音的错法不同，而本机 small 模型的错
+# 是"说得通顺但内容是编的"——多一个可切换的商用引擎，就多一次不把编造当事实
+# 的机会。协议（2026-11-16 按官方文档核对，勿凭记忆改）：
+#   POST https://api.minimax.cn/v1/speech_to_text
+#   Authorization: Bearer <key>
+#   multipart/form-data：model=asr-1.0、file=@<本地文件>、response_format=json
+#   请求头 language：BCP-47 单值（zh / yue / en / ja ...），不传=混合语言识别
+#   响应 {"text": "...", "duration": 秒, "trace_id": "..."}
+# 约束：≤500 秒、≤50MB、**不支持裸 PCM**（我们的 16kHz 单声道 wav 正合适）。
+# 比 DashScope 简单得多：一次 HTTP 表单直传本地文件，没有 websocket 状态机，
+# 所以这条路用 stdlib urllib 就够，不加依赖。
+# ============================================================================
+
+MINIMAX_ASR_ENDPOINT = 'https://api.minimax.cn/v1/speech_to_text'
+MINIMAX_ASR_MODEL = 'asr-1.0'
+#: 语言头默认值。给 zh 而不是留空（混合模式）：实测混合识别在短句上不如显式
+#: 单语种稳。粤语为主的会话用 --cloud-language yue 覆盖。
+MINIMAX_LANGUAGE = 'zh'
+
+
+def minimax_transcribe_wav(wav_path, key, model=MINIMAX_ASR_MODEL,
+                           language=MINIMAX_LANGUAGE, timeout=120, attempts=2):
+    """一个 WAV → 文字（MiniMax）。失败抛异常，调用方计数，**不静默当空**。
+
+    重试只覆盖连接层（超时/连接错误）；HTTP 4xx 是参数或 key 的问题，
+    重试只是把同一个错误重复两遍，所以解析出状态码后直接抛。
+    """
+    import urllib.error
+    import urllib.request
+
+    boundary = '----weflowVoice%s' % hashlib.md5(wav_path.encode()).hexdigest()
+    with open(wav_path, 'rb') as handle:
+        audio = handle.read()
+
+    def field(name, value):
+        return (b'--%s\r\nContent-Disposition: form-data; name="%s"\r\n\r\n%s\r\n'
+                % (boundary.encode(), name.encode(), str(value).encode()))
+
+    body = (b'--%s\r\n' % boundary.encode()
+            + field('model', model)
+            + field('response_format', 'json')
+            + b'--%s\r\nContent-Disposition: form-data; name="file"; '
+              b'filename="voice.wav"\r\nContent-Type: audio/wav\r\n\r\n'
+            + audio + b'\r\n'
+            + b'--%s--\r\n' % boundary.encode())
+
+    last = None
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(
+            MINIMAX_ASR_ENDPOINT, data=body, method='POST',
+            headers={'Authorization': 'Bearer ' + key,
+                     'Content-Type': 'multipart/form-data; boundary=%s' % boundary,
+                     **({'language': language} if language else {})})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+            text = (payload.get('text') or '').strip()
+            if not text:
+                # 空文本可能是真的静音，也可能是别的问题——trace_id 带上，
+                # 排查时对着服务端日志能找到这一条。
+                raise RuntimeError('MiniMax 返回空文本（trace_id=%s）'
+                                   % payload.get('trace_id'))
+            return text
+        except urllib.error.HTTPError as error:
+            detail = ''
+            try:
+                detail = error.read().decode('utf-8', 'replace')[:200]
+            except Exception:
+                pass
+            raise RuntimeError('MiniMax HTTP %s: %s' % (error.code, detail))
+        except (ConnectionError, TimeoutError, OSError) as error:
+            last = error
+    raise last
+
 CLOUD_ASR_ENDPOINT = 'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
 CLOUD_ASR_MODEL = 'paraformer-realtime-v2'
 #: 16kHz 16bit 单声道下约 100ms 的字节数（官方建议每块 1KB–16KB / 约 100ms）
@@ -411,42 +496,52 @@ def cloud_transcribe_wav(wav_path, key, model=CLOUD_ASR_MODEL,
     raise last
 
 
-def resolve_provider(provider, dashscope_key):
-    """'auto' → 有 DashScope key 就走云端，否则本地。
+def resolve_engine(engine, minimax_key='', dashscope_key=''):
+    """'auto' → 按 key 挑引擎：先 MiniMax，再 DashScope，都没有才本地。
 
-    返回 (provider, 原因)。云端优先是因为本机 whisper-small 会把方言/粤语
-    说得"像真的"（见模块头）；本地兜底是因为没 key 时它至少能出点东西，
-    而它的失败模式（通顺的错话）由 callers 侧的 `attach_voice_transcripts`
-    标注"未校对"来兜底。
+    返回 (engine, 原因)。云端优先是因为本机 whisper-small 会把方言/粤语
+    说得"像真的"（见模块头）；两家云端之间先 MiniMax 是用户在两家之间
+    明确选了它（2026-11-16），想换序用 `--engine` 显式指定。
     """
-    if provider == 'auto':
-        if dashscope_key:
-            return 'cloud', '检测到 dashscopeApiKey'
-        return 'local', '没有 dashscopeApiKey，退回本机 Whisper'
-    return provider, '命令行指定'
+    if engine != 'auto':
+        return engine, '命令行/配置指定'
+    if minimax_key:
+        return 'minimax', '检测到 minimaxApiKey'
+    if dashscope_key:
+        return 'dashscope', '检测到 dashscopeApiKey'
+    return 'local', '两个云端 key 都没配，退回本机 Whisper'
+
+
+#: `--engine` 的旧值 'cloud' 曾是 DashScope 的代号，留着当别名，别让老命令报错。
+ENGINE_ALIASES = {'cloud': 'dashscope'}
+
+
+def normalize_engine(engine):
+    return ENGINE_ALIASES.get(engine, engine)
 
 
 def ensure_transcripts(voices, cache_dir, model_name='',
                        beam_size=1, limit=0, language=DEFAULT_LANGUAGE,
-                       device='auto', log=print, provider='auto',
-                       dashscope_key='', language_hints=None):
+                       device='auto', log=print, engine='auto',
+                       minimax_key='', dashscope_key='', language_hints=None,
+                       cloud_language=MINIMAX_LANGUAGE):
     """Fill the transcript cache for any clip that is missing one.
 
     Returns (processed, cached, failed). Pending work is measured by cache
     misses, so an interrupted run resumes where it stopped instead of starting
     over - which matters, because a long conversation is hours of audio.
 
-    `provider`：'auto'（默认）/ 'cloud' / 'local'，见 `resolve_provider`。
-    `dashscope_key`：云端转写用（Paraformer），由 `_utils.get_dashscope_key` 解密后传入。
+    `engine`：'auto'（默认）/ 'minimax' / 'dashscope' / 'local'，见 `resolve_engine`。
+    两个 key 都由 `_utils` 解密后传入；`language_hints` 给 DashScope（多值），
+    `cloud_language` 给 MiniMax（单值 BCP-47）。
 
-    **缓存按 provider 分命名空间**：云端 key 形如 `cloud-<digest>`，本地沿用裸
-    `<digest>`（老缓存不失效）。两条路的文字质量不同——云端是商用 ASR，本地是
-    small 模型加"未校对"标注——混在同一个 key 下会让"升级后旧条目悄悄降级"或
-    反过来，谁都不知道一条转写是哪来的。
+    **缓存按引擎分命名空间**（`ENGINE_PREFIX`）：不同引擎的文字质量不同——商用
+    ASR 与 small 模型加"未校对"标注不是一回事——混在一个 key 下会让"一条转写
+    是谁转的"不可知。
     """
     cache = TranscriptCache(cache_dir)
-    resolved_provider, why = resolve_provider(provider, dashscope_key)
-    prefix = 'cloud-' if resolved_provider == 'cloud' else ''
+    resolved_engine, why = resolve_engine(engine, minimax_key, dashscope_key)
+    prefix = ENGINE_PREFIX.get(resolved_engine, '')
     pending = []
     for local_id, blob in voices.items():
         if not blob:
@@ -464,21 +559,31 @@ def ensure_transcripts(voices, cache_dir, model_name='',
         return 0, already, 0
 
     model = None
-    if resolved_provider == 'cloud':
-        if not dashscope_key:
+    cloud_key = ''
+    if resolved_engine == 'minimax':
+        if not minimax_key:
             # 不静默跳过：调用方看到的是"0 条新转写"，与"全部命中缓存"分不开。
-            log(f'指定了云端转写但没有 dashscopeApiKey（weflow-cli config set '
+            log(f'指定了 MiniMax 转写但没有 minimaxApiKey（weflow-cli config set '
+                f'minimaxApiKey "..."），{len(pending)} 条未转写')
+            return 0, already, len(pending)
+        cloud_key = minimax_key
+        log(f'待转写 {len(pending)} 条（已有 {already} 条）')
+        log(f'引擎: MiniMax {MINIMAX_ASR_MODEL}（{why}；language={cloud_language or "混合"}）')
+    elif resolved_engine == 'dashscope':
+        if not dashscope_key:
+            log(f'指定了 DashScope 转写但没有 dashscopeApiKey（weflow-cli config set '
                 f'dashscopeApiKey "..."），{len(pending)} 条未转写')
             return 0, already, len(pending)
+        cloud_key = dashscope_key
         log(f'待转写 {len(pending)} 条（已有 {already} 条）')
-        log(f'提供方: 云端 DashScope Paraformer（{CLOUD_ASR_MODEL}，{why}）')
+        log(f'引擎: DashScope {CLOUD_ASR_MODEL}（{why}）')
         log(f'语言提示: {"、".join(language_hints or CLOUD_LANGUAGE_HINTS)}'
             f'（改不了的话用 --hints）')
     else:
         resolved = resolve_model(model_name)
         log(f'待转写 {len(pending)} 条（已有 {already} 条）')
         log(f'模型: {resolved}（{why}；方言/粤语的错法是把话说得通顺但内容不对，'
-            f'结果按"未校对"用——要商用质量配 dashscopeApiKey 后加 --provider cloud）')
+            f'结果按"未校对"用——要商用质量配 minimaxApiKey 或 dashscopeApiKey）')
         model = load_model(model_name, device=device)
         if model is None:
             log('无法加载 faster-whisper 模型，转写跳过')
@@ -495,14 +600,17 @@ def ensure_transcripts(voices, cache_dir, model_name='',
                 failed += 1
             else:
                 try:
-                    if resolved_provider == 'cloud':
-                        text = cloud_transcribe_wav(wav_path, dashscope_key,
+                    if resolved_engine == 'minimax':
+                        text = minimax_transcribe_wav(wav_path, cloud_key,
+                                                      language=cloud_language)
+                    elif resolved_engine == 'dashscope':
+                        text = cloud_transcribe_wav(wav_path, cloud_key,
                                                     language_hints=language_hints)
                     else:
                         text = transcribe_wav(wav_path, model, beam_size=beam_size,
                                               language=language)
                 except Exception as error:  # noqa: BLE001 - 网络失败计 failed，不写缓存
-                    log(f'  第 {index} 条云端转写失败：{str(error)[:120]}')
+                    log(f'  第 {index} 条转写失败：{str(error)[:120]}')
                     failed += 1
                     try:
                         os.remove(wav_path)
@@ -529,7 +637,7 @@ def ensure_transcripts(voices, cache_dir, model_name='',
 def _main():
     import argparse
     parser = argparse.ArgumentParser(
-        description='微信语音转写（云端 DashScope Paraformer 或本机 Whisper）')
+        description='微信语音转写（MiniMax / DashScope 云端 ASR 或本机 Whisper）')
     parser.add_argument('--db', required=True, help='message_0.db 路径，用于定位同目录的 media_*.db')
     parser.add_argument('--key', required=True, help='NT key hex')
     parser.add_argument('--salt', required=True, help='NT salt hex')
@@ -541,18 +649,23 @@ def _main():
     parser.add_argument('--device', default='auto', choices=['auto', 'cuda', 'cpu'], help='推理设备')
     parser.add_argument('--beam-size', type=int, default=1)
     parser.add_argument('--limit', type=int, default=0, help='本次最多转写多少条（0 为不限）')
-    parser.add_argument('--provider', default='auto', choices=['auto', 'cloud', 'local'],
-                        help='转写提供方：auto=有 dashscopeApiKey 走云端否则本地（默认）；'
-                             'cloud=强制云端（没 key 会说明）；local=强制本机')
+    parser.add_argument('--engine', default='auto',
+                        choices=['auto', 'minimax', 'dashscope', 'cloud', 'local'],
+                        help='转写引擎：auto=按 key 挑，先 MiniMax 再 DashScope，都没有才本地（默认）；'
+                             'minimax/dashscope/cloud=强制某家云端（没 key 会说明）；local=强制本机')
     parser.add_argument('--hints', default='',
-                        help='云端语言提示，逗号分隔（默认 zh,yue；可英文 en、日文 ja 等）')
+                        help='DashScope 语言提示，逗号分隔（默认 zh,yue；可英文 en、日文 ja 等）')
+    parser.add_argument('--cloud-language', default='',
+                        help='MiniMax 语言头（默认 zh；粤语为主的会话用 yue；留空=混合识别）')
     args = parser.parse_args()
 
     # 云端 key 从配置解密后传入，**不走命令行参数**：密钥不该出现在进程表与 shell 历史里
-    dashscope_key = ''
+    minimax_key = dashscope_key = ''
     try:
-        from _utils import get_dashscope_key, load_config
-        dashscope_key = get_dashscope_key(load_config())
+        from _utils import get_dashscope_key, get_minimax_key, load_config
+        config = load_config()
+        minimax_key = get_minimax_key(config)
+        dashscope_key = get_dashscope_key(config)
     except Exception:
         pass
 
@@ -563,8 +676,9 @@ def _main():
         voices, args.cache_dir, model_name=args.model,
         beam_size=args.beam_size, limit=args.limit,
         language=args.language or None, device=args.device,
-        provider=args.provider, dashscope_key=dashscope_key,
-        language_hints=hints)
+        engine=normalize_engine(args.engine),
+        minimax_key=minimax_key, dashscope_key=dashscope_key,
+        language_hints=hints, cloud_language=args.cloud_language or MINIMAX_LANGUAGE)
     print(json.dumps({'success': True, 'voices': len(voices),
                       'transcribed': processed, 'cached': already, 'failed': failed},
                      ensure_ascii=False))

@@ -853,29 +853,34 @@ HTML 里放不出语音：微信语音是 **SILK v3** 格式，浏览器不支�
 
 **它是独立的、可断点续跑的一步，不在导出过程里。** 导出只读转写缓存；缓存没有的语音显示为 `[语音 6″]`。这样可以随时跑、随时停，跑过一遍就永久命中（按语音内容的 md5 缓存，同一条语音被转发到别处也只识别一次）。
 
-**两条转写路，默认自动选**（`--provider auto|cloud|local`）：
+**三条转写路，默认自动选**（`--engine auto|minimax|dashscope|local`）：
 
-| | 云端（推荐） | 本机 |
-| --- | --- | --- |
-| 引擎 | DashScope Paraformer-realtime-v2（商用 ASR） | faster-whisper（粤语微调 small） |
-| 质量 | 中文/粤语商用级 | 方言**说得通顺但内容是编的**，见下方实测 |
-| 速度 | 一条几秒 | 0.07 秒/条（GPU）～2 秒/条（CPU） |
-| 出网 | **音频发给阿里云** | 不出网 |
-| 前提 | `dashscopeApiKey` | `requirements-voice.txt` + 下载模型 |
-| 缓存 | `cloud-<md5>`（独立命名空间） | `<md5>` |
+| | MiniMax（默认首选） | DashScope | 本机 |
+| --- | --- | --- | --- |
+| 引擎 | `asr-1.0` | Paraformer-realtime-v2 | faster-whisper（粤语微调 small） |
+| 形态 | 一次 multipart 表单直传本地文件 | WebSocket 流式协议 | 本机推理 |
+| 质量 | 商用 ASR | 商用 ASR | 方言**说得通顺但内容是编的**，见下方实测 |
+| 速度 | 一条几秒 | 一条几秒 | 0.07 秒/条（GPU）～2 秒/条（CPU） |
+| 出网 | **音频发给 MiniMax** | **音频发给阿里云** | 不出网 |
+| 前提 | `minimaxApiKey` | `dashscopeApiKey` | `requirements-voice.txt` + 下载模型 |
+| 依赖 | 无（stdlib urllib） | `websockets` | `faster-whisper` + `pilk` |
+| 缓存 | `minimax-<md5>` | `dashscope-<md5>` | `<md5>` |
 
-**配了 key 就走云端，不用加任何参数**：
+**配 key 就自动走，不用加参数**；两家都配了先 MiniMax（`--engine` 可强制某家）：
 
 ```powershell
-weflow-cli config set dashscopeApiKey "sk-..."
+weflow-cli config set minimaxApiKey "你的key"
+# 或 weflow-cli config set dashscopeApiKey "sk-..."
 python scripts/wechat_voice.py --db "<message_0.db>" --key <key> --salt <salt> `
   --passphrase <passphrase> --talker "<会话id>" --cache-dir "output\.voice-cache"
-# 强制某一条路：--provider cloud / --provider local
-# 语言提示默认 zh,yue（普通话+粤语）；改：--hints zh,en
+# 强制某一家：--engine minimax / --engine dashscope / --engine local
+# MiniMax 语言头默认 zh；粤语为主的会话：--cloud-language yue
+# DashScope 语言提示默认 zh,yue；改：--hints zh,en
 ```
 
-`chat-notes` 出卡时同理：有 key 就自动用云端补语音转写（随 `--yes` 一起确认出网），
-没有 key 又不肯跑本机时，会明确说"差什么"，不静默跳过。
+`chat-notes` 出卡时同理：有任一家 key 就自动补语音转写（随 `--yes` 一起确认出网），
+没有 key 又不肯跑本机时，会明确说"差什么"，不静默跳过。同一条语音两条路都转过时
+**优先读 MiniMax 那份**。两家的缓存分开存，一条转写是谁转的永远可查。
 
 安装（可选，较重）：
 
@@ -923,10 +928,10 @@ python scripts/wechat_voice.py --db "<message_0.db>" --key <key> --salt <salt> `
 > 需要确证时以录音为准。若某个会话不需要转写，删掉输出目录下的 `.voice-cache`
 > 即可，导出会退回只显示 `[语音 N″]`。
 >
-> **云端 Paraformer 不受这一节限制**：商用 ASR 对粤语的识别质量足够进知识卡，
-> 所以它的标签只有「机器转写」（`[语音·云端转写]`），不挂"粤语欠准"的帽子。
-> 两条路的缓存分开存（`cloud-<md5>` vs `<md5>`），同一条语音两条路都转过时
-> **优先展示云端那份**。
+> **两家云端商用 ASR 不受这一节限制**：MiniMax 与 DashScope 对粤语的识别质量
+> 足够进知识卡，所以它们的标签只有「机器转写」（`[语音·云端转写]`），不挂
+> "粤语欠准"的帽子。三条路的缓存分开存（`minimax-` / `dashscope-` / 裸 digest），
+> 同一条语音多条路都转过时**优先展示 MiniMax，其次 DashScope**。
 
 实测对比（同一条粤语语音）：
 

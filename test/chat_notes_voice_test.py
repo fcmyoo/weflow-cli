@@ -111,36 +111,53 @@ class ProviderNamespaceTests(unittest.TestCase):
 
     def test_云端key带前缀_本地key保持原样(self):
         blob = b'\x02SILK' + b'p' * 40
-        self.assertTrue(wv.cache_key(blob, 'cloud').startswith('cloud-'))
+        self.assertTrue(wv.cache_key(blob, 'minimax').startswith('minimax-'))
+        self.assertTrue(wv.cache_key(blob, 'dashscope').startswith('dashscope-'))
         self.assertEqual(wv.cache_key(blob, 'local'), wv.voice_key(blob),
                          '本地 key 必须保持原样——老缓存不能因为加了云端就失效')
 
-    def test_两条路都转过时优先读云端(self):
+    def test_三条路都转过时优先读MiniMax(self):
         blob = b'\x02SILK' + b'q' * 40
-        cache = FakeCache({wv.cache_key(blob, 'cloud'): '云端认的字',
+        cache = FakeCache({wv.cache_key(blob, 'minimax'): 'MiniMax 认的字',
+                           wv.cache_key(blob, 'dashscope'): '阿里认的字',
                            wv.cache_key(blob, 'local'): '本机认的字'})
-        text, provider = wv.lookup_transcript(cache, blob)
-        self.assertEqual((text, provider), ('云端认的字', 'cloud'))
+        text, engine = wv.lookup_transcript(cache, blob)
+        self.assertEqual((text, engine), ('MiniMax 认的字', 'minimax'))
+
+    def test_只有DashScope时读它(self):
+        blob = b'\x02SILK' + b'q2' * 40
+        cache = FakeCache({wv.cache_key(blob, 'dashscope'): '阿里认的字'})
+        text, engine = wv.lookup_transcript(cache, blob)
+        self.assertEqual((text, engine), ('阿里认的字', 'dashscope'))
 
     def test_只有本地时回退本地(self):
         blob = b'\x02SILK' + b'r' * 40
         cache = FakeCache({wv.cache_key(blob, 'local'): '本机认的字'})
-        text, provider = wv.lookup_transcript(cache, blob)
-        self.assertEqual((text, provider), ('本机认的字', 'local'))
+        text, engine = wv.lookup_transcript(cache, blob)
+        self.assertEqual((text, engine), ('本机认的字', 'local'))
 
     def test_都没有时返回空(self):
-        text, provider = wv.lookup_transcript(FakeCache({}), b'\x02SILK' + b's' * 40)
-        self.assertEqual((text, provider), (None, ''))
+        text, engine = wv.lookup_transcript(FakeCache({}), b'\x02SILK' + b's' * 40)
+        self.assertEqual((text, engine), (None, ''))
 
-    def test_auto_有key走云端_没key回本地(self):
-        self.assertEqual(wv.resolve_provider('auto', 'sk-x'), ('cloud', '检测到 dashscopeApiKey'))
-        provider, _ = wv.resolve_provider('auto', '')
+    def test_auto_优先MiniMax其次DashScope最后本地(self):
+        self.assertEqual(wv.resolve_engine('auto', 'mm-key', 'ds-key'),
+                         ('minimax', '检测到 minimaxApiKey'))
+        self.assertEqual(wv.resolve_engine('auto', '', 'ds-key'),
+                         ('dashscope', '检测到 dashscopeApiKey'))
+        provider, _ = wv.resolve_engine('auto', '', '')
         self.assertEqual(provider, 'local')
 
     def test_显式指定压过自动判断(self):
-        self.assertEqual(wv.resolve_provider('local', 'sk-x')[0], 'local',
+        self.assertEqual(wv.resolve_engine('local', 'mm-key')[0], 'local',
                          '显式 local 不许因为有 key 就被送去出网')
-        self.assertEqual(wv.resolve_provider('cloud', '')[0], 'cloud')
+        self.assertEqual(wv.resolve_engine('dashscope', 'mm-key')[0], 'dashscope',
+                         '显式 dashscope 不许被 MiniMax key 抢走')
+
+    def test_旧值cloud是dashscope的别名(self):
+        # `--engine cloud` 是 DashScope 引入时的旧写法，别让老命令报错
+        self.assertEqual(wv.normalize_engine('cloud'), 'dashscope')
+        self.assertEqual(wv.normalize_engine('minimax'), 'minimax')
 
 
 class CloudLabelTests(unittest.TestCase):
@@ -148,7 +165,7 @@ class CloudLabelTests(unittest.TestCase):
 
     def test_只有云端条目时用云端标签(self):
         blob = b'\x02SILK' + b'c' * 40
-        cache = FakeCache({wv.cache_key(blob, 'cloud'): '商用识别结果'})
+        cache = FakeCache({wv.cache_key(blob, 'minimax'): '商用识别结果'})
         messages = [voice(1541, blob)]
         enriched, pending = cn.attach_voice_transcripts(messages, {1541: blob}, cache)
         self.assertEqual((enriched, pending), (1, 0))
@@ -156,13 +173,13 @@ class CloudLabelTests(unittest.TestCase):
         self.assertIn(cn.VOICE_LABEL_CLOUD, messages[0]['parsedContent'])
         self.assertNotIn(cn.VOICE_LABEL, messages[0]['parsedContent'])
 
-    def test_两条路都有时用云端那份与云端标签(self):
+    def test_两条路都有时用MiniMax那份与云端标签(self):
         blob = b'\x02SILK' + b'd' * 40
-        cache = FakeCache({wv.cache_key(blob, 'cloud'): '云端字',
+        cache = FakeCache({wv.cache_key(blob, 'minimax'): 'MiniMax 字',
                            wv.cache_key(blob, 'local'): '本机字'})
         messages = [voice(1542, blob)]
         cn.attach_voice_transcripts(messages, {1542: blob}, cache)
-        self.assertIn('云端字', messages[0]['parsedContent'])
+        self.assertIn('MiniMax 字', messages[0]['parsedContent'])
         self.assertNotIn('本机字', messages[0]['parsedContent'])
 
 
@@ -282,6 +299,125 @@ class CloudProtocolTests(unittest.TestCase):
         # 音频是二进制帧，排在两条文本指令之间
         self.assertTrue(any(isinstance(s, (bytes, bytearray)) for s in sent),
                         'PCM 必须以二进制帧发送')
+
+
+class _FakeHTTPResponse:
+    """urlopen 的返回值形状：上下文管理器 + read()。"""
+
+    def __init__(self, payload, status=200):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload, ensure_ascii=False).encode('utf-8')
+
+
+class MiniMaxProtocolTests(unittest.TestCase):
+    """MiniMax speech_to_text 的报文与响应解析（2026-11-16 按官方文档）。
+
+    这条路的形状与 DashScope 完全不同：一次 multipart 表单直传本地文件。
+    错一处（字段名、header、响应路径）的表现是"转写全是空的"，所以用假
+    urllib 把请求与响应两头都钉住。
+    """
+
+    def _wav(self):
+        import tempfile
+        import wave
+        tmp = tempfile.mkdtemp(prefix='wv-mm-')
+        path = os.path.join(tmp, 'a.wav')
+        with wave.open(path, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b'\x00\x01' * 800)
+        self.addCleanup(lambda: __import__('shutil').rmtree(tmp, ignore_errors=True))
+        return path
+
+    def _call(self, payload, status=200, language='zh'):
+        import unittest.mock as mock
+        import urllib.error
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured['url'] = request.full_url
+            captured['headers'] = dict(request.header_items())
+            captured['body'] = request.data
+            if status and status >= 400:
+                raise urllib.error.HTTPError(request.full_url, status, 'err', None, None)
+            return _FakeHTTPResponse(payload)
+
+        with mock.patch('urllib.request.urlopen', fake_urlopen):
+            if status and status >= 400:
+                with self.assertRaises(RuntimeError):
+                    wv.minimax_transcribe_wav(self._wav(), 'mm-key', language=language)
+            else:
+                text = wv.minimax_transcribe_wav(self._wav(), 'mm-key', language=language)
+                return text, captured
+        return None, captured
+
+    def test_取text字段(self):
+        text, _ = self._call({'text': '实际上还是商家赚了', 'duration': 26.3,
+                              'trace_id': 'abc'})
+        self.assertEqual(text, '实际上还是商家赚了')
+
+    def test_空文本要抛_带trace_id(self):
+        """空文本可能是真静音也可能是别的问题——不静默当成功，
+        trace_id 带上，排查时能对着服务端日志找到这一条。"""
+        import unittest.mock as mock
+        with mock.patch('urllib.request.urlopen',
+                        lambda req, timeout=None: _FakeHTTPResponse(
+                            {'text': '', 'trace_id': 't-1'})):
+            with self.assertRaises(RuntimeError) as ctx:
+                wv.minimax_transcribe_wav(self._wav(), 'mm-key')
+        self.assertIn('t-1', str(ctx.exception))
+
+    def test_端点与鉴权头(self):
+        _text, captured = self._call({'text': '字'})
+        self.assertEqual(captured['url'], 'https://api.minimax.cn/v1/speech_to_text')
+        self.assertEqual(captured['headers'].get('Authorization'), 'Bearer mm-key')
+        self.assertIn('multipart/form-data', captured['headers'].get('Content-type', ''))
+
+    def test_multipart里四个部件齐整(self):
+        _text, captured = self._call({'text': '字'}, language='yue')
+        body = captured['body']
+        self.assertIn(b'name="model"', body)
+        self.assertIn(b'asr-1.0', body)
+        self.assertIn(b'name="response_format"', body)
+        self.assertIn(b'name="file"; filename="voice.wav"', body)
+        self.assertIn(b'audio/wav', body)
+        # 语言走 **header** 不是表单字段：两种传错一种的表现都是"用了默认语言"
+        self.assertEqual(captured['headers'].get('Language'), 'yue')
+
+    def test_HTTP错误要抛_不静默当空(self):
+        _none, captured = self._call({}, status=401)
+        # _call 内部已断言抛 RuntimeError；这里再确认它带了状态码
+        import unittest.mock as mock
+        import urllib.error
+        import tempfile
+        import wave
+        tmp = tempfile.mkdtemp(prefix='wv-mm2-')
+        path = os.path.join(tmp, 'a.wav')
+        with wave.open(path, 'wb') as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(b'\x00\x00' * 100)
+
+        def raise_http(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 401, 'Unauthorized',
+                                         None, None)
+
+        with mock.patch('urllib.request.urlopen', raise_http):
+            with self.assertRaises(RuntimeError) as ctx:
+                wv.minimax_transcribe_wav(path, 'bad-key')
+        self.assertIn('401', str(ctx.exception))
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == '__main__':

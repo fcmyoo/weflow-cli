@@ -1522,7 +1522,7 @@ const configurableKeys = [
   'dbPath', 'decryptKey', 'dbPath3x', 'decryptKey3x', 'dataVersion', 'wxid',
   'ntDbPath', 'ntKey', 'ntSalt', 'contactDbPath', 'contactKey', 'contactSalt',
   'vaultRepo', 'aiEngine', 'aiBaseUrl', 'aiModel', 'deepseekApiKey', 'typesafeApiKey',
-  'dashscopeApiKey', 'favPassphrase',
+  'dashscopeApiKey', 'minimaxApiKey', 'favPassphrase',
   'judgeProvider', 'openrouterApiKey', 'openrouterJudgeModel', 'judgeLocalUrl', 'judgeEndpoint',
   'wereadApiKey',
   'assistantPrivacy', 'assistantWhitelist', 'assistantGroupWhitelist',

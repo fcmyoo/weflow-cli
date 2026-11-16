@@ -1088,6 +1088,28 @@ def get_dashscope_key(config=None) -> str:
         return ''
 
 
+def get_minimax_key(config=None) -> str:
+    """读取 MiniMax 开放平台的 key（语音转写用），自动解密 lock: 前缀。
+
+    形状同 `get_dashscope_key`：磁盘上是密文，**别直接 config.get**；解密失败
+    回空串（跨机器拷配置时该表现为"没配"，不是崩）。语音转写没配 key 时会
+    明确说"差什么"，不会静默跳过——见 `wechat_voice.ensure_transcripts`。
+    """
+    if config is None:
+        try:
+            config = load_config()
+        except Exception as exc:
+            warn_once('load_config', '读不到配置文件 %s（%s: %s）—— 本次当作空配置，需要配置的功能会退化成默认行为'
+                      % (CONFIG_PATH, type(exc).__name__, exc))
+            return ''
+    try:
+        return decrypt_lock(config.get('minimaxApiKey', ''))
+    except Exception as exc:
+        warn_once('minimaxApiKey', '配置项 minimaxApiKey 解不开（%s: %s）—— 当作"没配"，语音转写会退回别的引擎'
+                  % (type(exc).__name__, exc))
+        return ''
+
+
 def get_typesafe_key(config=None) -> str:
     """读取 TypeSafe (Jev) 决策模型的 key，自动解密 lock: 前缀。
 

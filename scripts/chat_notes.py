@@ -356,10 +356,10 @@ def attach_voice_transcripts(messages, voice_map, cache):
         if message.get('localType') != VOICE_TYPE:
             continue
         blob = voice_map.get(message.get('localId')) if voice_map else None
-        text, provider = (wechat_voice.lookup_transcript(cache, blob)
-                          if (blob and cache) else (None, ''))
+        text, engine = (wechat_voice.lookup_transcript(cache, blob)
+                        if (blob and cache) else (None, ''))
         if text:
-            label = VOICE_LABEL_CLOUD if provider == 'cloud' else VOICE_LABEL
+            label = VOICE_LABEL if engine == 'local' else VOICE_LABEL_CLOUD
             message['parsedContent'] = '%s %s' % (label, text)
             enriched += 1
         else:
@@ -507,26 +507,31 @@ def collect(out_root, days, limit, transcribe_voice=False, source='wechat'):
                               for m in in_window if m.get('localType') == VOICE_TYPE}
                     wanted = {k: v for k, v in wanted.items() if v}
                     if wanted:
-                        # 语音转写的三条路（2026-11-16 起）：
-                        #   有 dashscopeApiKey → 云端 Paraformer，一条几秒，**默认就跑**
-                        #     （质量远好于本机 small 模型——那个会把方言说得通顺但内容是编的）；
+                        # 语音转写的四条路（2026-11-16 起，MiniMax 接入后）：
+                        #   有 minimaxApiKey → MiniMax asr-1.0（默认首选，用户选定）；
+                        #   否则有 dashscopeApiKey → DashScope Paraformer；
                         #   没 key + --transcribe-voice → 本机 Whisper（慢、吃 CPU，显式 opt-in）；
                         #   没 key 也没 flag → 不动，说清差什么。
                         # 出网边界：云端转写随 chat-notes 的 --yes 一起确认（那条确认的
                         # 就是"把这些材料发给 AI"），key 从配置解密、不进命令行参数。
-                        from _utils import get_dashscope_key
+                        from _utils import get_dashscope_key, get_minimax_key
+                        minimax_key = get_minimax_key(config)
                         dashscope_key = get_dashscope_key(config)
-                        if not dashscope_key and not transcribe_voice:
-                            print('    %d 条语音未转写：配 dashscopeApiKey 走云端'
-                                  '（weflow-cli config set dashscopeApiKey "..."），'
+                        if not minimax_key and not dashscope_key and not transcribe_voice:
+                            print('    %d 条语音未转写：配 minimaxApiKey 走 MiniMax'
+                                  '（weflow-cli config set minimaxApiKey "..."），'
+                                  '或 dashscopeApiKey 走阿里，'
                                   '或加 --transcribe-voice 用本机 Whisper' % len(wanted),
                                   file=sys.stderr)
                         else:
                             done, already, failed = wechat_voice.ensure_transcripts(
-                                wanted, VOICE_CACHE_DIR, provider='auto',
-                                dashscope_key=dashscope_key,
+                                wanted, VOICE_CACHE_DIR, engine='auto',
+                                minimax_key=minimax_key, dashscope_key=dashscope_key,
                                 log=lambda line: print('    ' + line, file=sys.stderr))
-                            where = '云端模型，已出网' if dashscope_key else '本地模型，未出网'
+                            engine = wechat_voice.resolve_engine('auto', minimax_key,
+                                                                 dashscope_key)[0]
+                            where = ('本地 Whisper，未出网' if engine == 'local'
+                                     else '%s，已出网' % engine)
                             print('  语音转写: 新识别 %d 条、已有 %d 条、失败 %d 条（%s）'
                                   % (done, already, failed, where), file=sys.stderr)
                 enriched, pending = attach_voice_transcripts(in_window, voice_map, voice_cache)
