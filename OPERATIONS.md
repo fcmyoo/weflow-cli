@@ -866,7 +866,10 @@ HTML 里放不出语音：微信语音是 **SILK v3** 格式，浏览器不支�
 | 依赖 | 无（stdlib urllib） | `websockets` | `faster-whisper` + `pilk` |
 | 缓存 | `minimax-<md5>` | `dashscope-<md5>` | `<md5>` |
 
-**配 key 就自动走，不用加参数**；两家都配了先 MiniMax（`--engine` 可强制某家）：
+**配 key 就自动走，不用加参数**；两家都配了先 MiniMax（`--engine` 可强制某家）。
+**auto 是候选链不是单选**：优先的一家额度用尽（429）或 key 失效（401/403）时，
+本批自动改用下一家——配两家的冗余才是真冗余。本地永远垫底（两家云端都不可用时
+兜底，转写带"未校对"标签）。缓存按引擎分命名空间，一条转写是谁转的永远可查：
 
 ```powershell
 weflow-cli config set minimaxApiKey "你的key"

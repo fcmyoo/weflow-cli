@@ -521,6 +521,45 @@ def resolve_engine(engine, minimax_key='', dashscope_key=''):
     return 'local', '两个云端 key 都没配，退回本机 Whisper'
 
 
+#: auto 的完整优先序（显式指定时只用那一个）。本地垫底：它至少能出点东西，
+#: 而它的失败模式（通顺的错话）由标签"未校对"兜底。
+ENGINE_ORDER = {'auto': ('minimax', 'dashscope', 'local')}
+
+
+def resolve_engine_candidates(engine, minimax_key='', dashscope_key=''):
+    """auto → **可用引擎的有序列表**（不是单选一个）。
+
+    为什么是列表：两套云端 key 都配上时，优先的那家可能没额度（MiniMax
+    Token Plan 用尽、DashScope 余额不足都会这样）。只选一家就意味着另一家
+    明明能用却整个批次报失败——配两家的意义（互为冗余）就没了。所以 auto
+    给候选列表，逐家试，见 `engine_unusable` 的落选规则。
+
+    本地（`local`）**永远在列表末尾**：两家云端都确定性不可用时它兜底
+    （转写带"未校对"标签），代价是慢；但"整个批次失败"比慢更贵。
+    """
+    order = ENGINE_ORDER.get(normalize_engine(engine), (normalize_engine(engine),))
+    keys = {'minimax': minimax_key, 'dashscope': dashscope_key}
+    return [name for name in order if name == 'local' or keys.get(name)]
+
+
+#: "这家这次别用了"的信号：额度用尽（429）、欠费（402）、key 无效（401/403）。
+#: 共同点是**确定性**——重试不会好，换一家才会。连接层抖动不算（各家的
+#: `*_transcribe_wav` 内部已按可重试异常重试过一轮）。
+_UNUSABLE_MARKERS = ('429', '402', '401', '403', 'quota', '额度', '用量',
+                     'arrear', 'unauthorized', 'invalid api', 'Token Plan')
+
+
+def engine_unusable(error) -> bool:
+    """这个错误是否意味着"换一家试试"（而不是"这一条失败了"）。
+
+    判据保守：只认确定性信号（见 `_UNUSABLE_MARKERS`）。误判成 usable 的
+    代价是一条转写失败；误判成 unusable 的代价是**该用本机兜底时悄悄用了
+    另一家云端**（出网！），所以宁可漏认，不要错认。
+    """
+    text = str(error).lower()
+    return any(marker.lower() in text for marker in _UNUSABLE_MARKERS)
+
+
 #: `--engine` 的旧值 'cloud' 曾是 DashScope 的代号，留着当别名，别让老命令报错。
 ENGINE_ALIASES = {'cloud': 'dashscope'}
 
@@ -540,24 +579,28 @@ def ensure_transcripts(voices, cache_dir, model_name='',
     misses, so an interrupted run resumes where it stopped instead of starting
     over - which matters, because a long conversation is hours of audio.
 
-    `engine`：'auto'（默认）/ 'minimax' / 'dashscope' / 'local'，见 `resolve_engine`。
-    两个 key 都由 `_utils` 解密后传入；`language_hints` 给 DashScope（多值），
-    `cloud_language` 给 MiniMax（单值 BCP-47）。
+    `engine`：'auto'（默认）/ 'minimax' / 'dashscope' / 'local'，见
+    `resolve_engine_candidates`。auto 给的是**候选列表**：优先序上的一家
+    额度用尽或 key 失效时，本批自动改用下一家（`engine_unusable` 的判据），
+    配两家的冗余才算真冗余。两个 key 都由 `_utils` 解密后传入；
+    `language_hints` 给 DashScope（多值），`cloud_language` 给 MiniMax（单值）。
 
     **缓存按引擎分命名空间**（`ENGINE_PREFIX`）：不同引擎的文字质量不同——商用
     ASR 与 small 模型加"未校对"标注不是一回事——混在一个 key 下会让"一条转写
-    是谁转的"不可知。
+    是谁转的"不可知。同理，一条语音只要**任一家**转过就算待办里没有它。
     """
     cache = TranscriptCache(cache_dir)
-    resolved_engine, why = resolve_engine(engine, minimax_key, dashscope_key)
-    prefix = ENGINE_PREFIX.get(resolved_engine, '')
+    candidates = resolve_engine_candidates(engine, minimax_key, dashscope_key)
+    prefixes = {name: ENGINE_PREFIX.get(name, '') for name in candidates}
     pending = []
     for local_id, blob in voices.items():
         if not blob:
             continue
-        key = prefix + voice_key(blob)
-        if cache.get(key) is None:
-            pending.append((key, blob))
+        # 任一家已有缓存就不算待办（读取优先序见 lookup_transcript）
+        if any(cache.get(prefixes[name] + voice_key(blob)) is not None
+               for name in candidates):
+            continue
+        pending.append(blob)
     # Count the cache hits before --limit trims the queue, otherwise a limited
     # run reports everything it did not process as already done.
     already = len(voices) - len(pending)
@@ -567,71 +610,79 @@ def ensure_transcripts(voices, cache_dir, model_name='',
         log(f'所有 {len(voices)} 条语音都已有转写（缓存命中）')
         return 0, already, 0
 
-    model = None
-    cloud_key = ''
-    if resolved_engine == 'minimax':
-        if not minimax_key:
-            # 不静默跳过：调用方看到的是"0 条新转写"，与"全部命中缓存"分不开。
-            log(f'指定了 MiniMax 转写但没有 minimaxApiKey（weflow-cli config set '
-                f'minimaxApiKey "..."），{len(pending)} 条未转写')
-            return 0, already, len(pending)
-        cloud_key = minimax_key
-        log(f'待转写 {len(pending)} 条（已有 {already} 条）')
-        log(f'引擎: MiniMax {MINIMAX_ASR_MODEL}（{why}；language={cloud_language or "混合"}）')
-    elif resolved_engine == 'dashscope':
-        if not dashscope_key:
-            log(f'指定了 DashScope 转写但没有 dashscopeApiKey（weflow-cli config set '
-                f'dashscopeApiKey "..."），{len(pending)} 条未转写')
-            return 0, already, len(pending)
-        cloud_key = dashscope_key
-        log(f'待转写 {len(pending)} 条（已有 {already} 条）')
-        log(f'引擎: DashScope {CLOUD_ASR_MODEL}（{why}）')
-        log(f'语言提示: {"、".join(language_hints or CLOUD_LANGUAGE_HINTS)}'
-            f'（改不了的话用 --hints）')
+    keys = {'minimax': minimax_key, 'dashscope': dashscope_key}
+    log(f'待转写 {len(pending)} 条（已有 {already} 条）')
+    if len(candidates) > 1:
+        log(f'引擎候选: {" → ".join(candidates)}（前面的不可用会自动往后走）')
     else:
-        resolved = resolve_model(model_name)
-        log(f'待转写 {len(pending)} 条（已有 {already} 条）')
-        log(f'模型: {resolved}（{why}；方言/粤语的错法是把话说得通顺但内容不对，'
-            f'结果按"未校对"用——要商用质量配 minimaxApiKey 或 dashscopeApiKey）')
-        model = load_model(model_name, device=device)
-        if model is None:
-            log('无法加载 faster-whisper 模型，转写跳过')
+        only = candidates[0]
+        if only != 'local' and not keys.get(only):
+            # 不静默跳过：调用方看到的是"0 条新转写"，与"全部命中缓存"分不开。
+            log(f'指定了 {only} 转写但没有对应的 key'
+                f'（weflow-cli config set {only}ApiKey "..."），{len(pending)} 条未转写')
             return 0, already, len(pending)
+        log(f'引擎: {only}（命令行/配置指定）')
+
+    # 本机模型**懒加载**：它只在云端都不可用时才上场，而加载要几秒到几十秒。
+    model = None
+    model_tried = False
+    #: 本批已判定"不可用"的引擎（额度用尽 / key 失效）——确定性信号，重试无益
+    unusable = set()
 
     import tempfile
     processed = failed = 0
     scratch = tempfile.mkdtemp(prefix='weflow-voice-')
     try:
-        for index, (key, blob) in enumerate(pending, 1):
+        for index, blob in enumerate(pending, 1):
             wav_path = os.path.join(scratch, f'{index}.wav')
             if not decode_silk(blob, wav_path):
-                cache.put(key, '')
+                # 解不了码是本地问题，与引擎无关：记空并计失败（老行为）
+                cache.put(prefixes[candidates[0]] + voice_key(blob), '')
                 failed += 1
-            else:
+                continue
+            done = False
+            last_error = None
+            for name in candidates:
+                if name in unusable:
+                    continue
                 try:
-                    if resolved_engine == 'minimax':
-                        text = minimax_transcribe_wav(wav_path, cloud_key,
+                    if name == 'minimax':
+                        text = minimax_transcribe_wav(wav_path, keys[name],
                                                       language=cloud_language)
-                    elif resolved_engine == 'dashscope':
-                        text = cloud_transcribe_wav(wav_path, cloud_key,
+                    elif name == 'dashscope':
+                        text = cloud_transcribe_wav(wav_path, keys[name],
                                                     language_hints=language_hints)
                     else:
+                        if not model_tried:
+                            model_tried = True
+                            log(f'模型: {resolve_model(model_name)}（云端不可用，'
+                                f'本机兜底；方言/粤语的错法是把话说得通顺但内容不对，'
+                                f'结果按"未校对"用）')
+                            model = load_model(model_name, device=device)
+                        if model is None:
+                            break
                         text = transcribe_wav(wav_path, model, beam_size=beam_size,
                                               language=language)
-                except Exception as error:  # noqa: BLE001 - 网络失败计 failed，不写缓存
-                    log(f'  第 {index} 条转写失败：{str(error)[:120]}')
-                    failed += 1
-                    try:
-                        os.remove(wav_path)
-                    except OSError:
-                        pass
-                    continue
-                cache.put(key, text)
+                except Exception as error:  # noqa: BLE001 - 分类后分流
+                    last_error = error
+                    if engine_unusable(error):
+                        unusable.add(name)
+                        log(f'  {name} 本批不可用（{str(error)[:100]}），'
+                            f'后续转写走 {" → ".join(n for n in candidates if n not in unusable) or "无"}')
+                        continue
+                    break
+                cache.put(prefixes[name] + voice_key(blob), text)
                 processed += 1
-                try:
-                    os.remove(wav_path)
-                except OSError:
-                    pass
+                done = True
+                break
+            if not done:
+                failed += 1
+                if last_error is not None:
+                    log(f'  第 {index} 条转写失败：{str(last_error)[:120]}')
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
             if index % 10 == 0 or index == len(pending):
                 log(f'  转写 {index}/{len(pending)}（新增 {processed}，失败 {failed}）')
     finally:

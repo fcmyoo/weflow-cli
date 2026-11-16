@@ -524,14 +524,17 @@ def collect(out_root, days, limit, transcribe_voice=False, source='wechat'):
                                   '或加 --transcribe-voice 用本机 Whisper' % len(wanted),
                                   file=sys.stderr)
                         else:
+                            # 回退发生在 ensure_transcripts 内部（优先的引擎
+                            # 额度用尽会自动换下一家），所以这里只报候选链，
+                            # 具体哪家转的以缓存前缀为准——报错引擎名比不报更糟。
+                            chain = ' → '.join(wechat_voice.resolve_engine_candidates(
+                                'auto', minimax_key, dashscope_key))
+                            where = ('本地 Whisper，未出网'
+                                     if chain == 'local' else '%s（自动回退）' % chain)
                             done, already, failed = wechat_voice.ensure_transcripts(
                                 wanted, VOICE_CACHE_DIR, engine='auto',
                                 minimax_key=minimax_key, dashscope_key=dashscope_key,
                                 log=lambda line: print('    ' + line, file=sys.stderr))
-                            engine = wechat_voice.resolve_engine('auto', minimax_key,
-                                                                 dashscope_key)[0]
-                            where = ('本地 Whisper，未出网' if engine == 'local'
-                                     else '%s，已出网' % engine)
                             print('  语音转写: 新识别 %d 条、已有 %d 条、失败 %d 条（%s）'
                                   % (done, already, failed, where), file=sys.stderr)
                 enriched, pending = attach_voice_transcripts(in_window, voice_map, voice_cache)

@@ -160,6 +160,88 @@ class ProviderNamespaceTests(unittest.TestCase):
         self.assertEqual(wv.normalize_engine('minimax'), 'minimax')
 
 
+class EngineFallthroughTests(unittest.TestCase):
+    """auto 的候选列表与"这家不可用就换下家"。
+
+    为什么值得钉：2026-11-16 真机踩过——两把 key 都配上，而优先的 MiniMax
+    没额度，单选一家的实现让整个批次报失败，明明 DashScope 能用。配两家的
+    冗余必须是真的冗余。
+    """
+
+    def test_候选列表按优先序_本地永远垫底(self):
+        """本地**始终**在候选里：两家云端都不可用时它兜底（带"未校对"标签），
+        而不是整个批次失败。它只在云端都确定性死亡时才上场，所以不值得为它
+        省这一次加载。"""
+        self.assertEqual(wv.resolve_engine_candidates('auto', 'mm', 'ds'),
+                         ['minimax', 'dashscope', 'local'])
+        self.assertEqual(wv.resolve_engine_candidates('auto', '', 'ds'),
+                         ['dashscope', 'local'])
+        self.assertEqual(wv.resolve_engine_candidates('auto', '', ''),
+                         ['local'])
+
+    def test_显式指定时候选只有一个(self):
+        self.assertEqual(wv.resolve_engine_candidates('dashscope', 'mm', 'ds'),
+                         ['dashscope'])
+        self.assertEqual(wv.resolve_engine_candidates('local', 'mm', 'ds'),
+                         ['local'], '显式 local 不许因为有 key 就出网')
+
+    def test_不可用判据认确定性信号(self):
+        for message in ['MiniMax HTTP 429: 已达到 Token Plan 用量上限',
+                        'MiniMax HTTP 402: quota',
+                        'RuntimeError: 401 Unauthorized',
+                        'HTTP 403 forbidden',
+                        'arrearage detected']:
+            self.assertTrue(wv.engine_unusable(Exception(message)),
+                            '应当判为可换下家：%s' % message)
+
+    def test_普通失败不误判为不可用(self):
+        """误判成 unusable 的代价是**悄悄出了网**（该用本机时用了另一家云端），
+        所以判据必须保守：连接抖动、超时都不算。"""
+        for message in ['TimeoutError', 'ConnectionResetError',
+                        'MiniMax 返回空文本（trace_id=t-1）',
+                        '服务端返回乱码']:
+            self.assertFalse(wv.engine_unusable(Exception(message)),
+                             '不应当换下家：%s' % message)
+
+    def test_额度耗尽自动落到下一家并缓存到那家名下(self):
+        """端到端：MiniMax 429 → DashScope 顶上，且缓存写在 dashscope- 前缀下。"""
+        import tempfile
+        import unittest.mock as mock
+        blob = b'\x02SILK' + b'z' * 40
+        voices = {1: blob}
+        cache_dir = tempfile.mkdtemp(prefix='wv-fall-')
+        calls = []
+
+        def fake_minimax(path, key, **kwargs):
+            calls.append('minimax')
+            raise RuntimeError('MiniMax HTTP 429: 已达到 Token Plan 用量上限')
+
+        def fake_dashscope(path, key, **kwargs):
+            calls.append('dashscope')
+            return '阿里认的字'
+
+        def fake_decode(blob_bytes, wav_path):
+            open(wav_path, 'wb').write(b'RIFF')
+            return True
+
+        with mock.patch.object(wv, 'minimax_transcribe_wav', fake_minimax), \
+             mock.patch.object(wv, 'cloud_transcribe_wav', fake_dashscope), \
+             mock.patch.object(wv, 'decode_silk', fake_decode):
+            processed, already, failed = wv.ensure_transcripts(
+                voices, cache_dir, engine='auto',
+                minimax_key='mm', dashscope_key='ds', log=lambda line: None)
+        self.assertEqual((processed, already, failed), (1, 0, 0))
+        self.assertEqual(calls, ['minimax', 'dashscope'], '先试 MiniMax，失败即换')
+        # 缓存必须落在 DashScope 名下——读了这条的人知道它是谁转的
+        import os
+        self.assertEqual(os.listdir(cache_dir),
+                         [wv.cache_key(blob, 'dashscope')])
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
 class CloudLabelTests(unittest.TestCase):
     """云端转写挂云端的标签，本机的挂"未校对"——标签错了比没有标签更误导。"""
 
