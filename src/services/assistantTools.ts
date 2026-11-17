@@ -19,6 +19,13 @@ import type { Contact } from '../types.js'
 import { clipWithMarker } from '../utils/text.js'
 import { resolveSince, resolveUntil } from '../utils/dateRange.js'
 import { isAllowedWeChatArticleUrl, safeDate } from '../utils/mcpSecurity.js'
+import {
+  getBacklinks,
+  getOutgoingLinks,
+  getUnresolvedLinks,
+  readNote,
+  searchVault,
+} from './obsidianService.js'
 
 const PKG_ROOT = resolvePackageRoot(import.meta.url)
 /**
@@ -1247,6 +1254,59 @@ export const TOOL_DEFS: ToolDef[] = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'obsidian_search',
+      description: '在用户的 Obsidian 知识库里全文搜索。'
+        + '与 search_knowledge 的区别：**这条走 Obsidian 自己的索引**，'
+        + '所以用户自己在 Obsidian 里手写的笔记也能搜到，'
+        + '而 search_knowledge 只看 weflow-cli 编译出来的概念页。'
+        + '要问「我笔记里写过什么」用这条，要问「知识库里有哪些概念」用 search_knowledge。'
+        + '需要 Obsidian 正在运行。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索词' },
+          limit: { type: 'number', description: '返回条数, 默认10' },
+          vault: { type: 'string', description: '库名，默认当前活动库' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'obsidian_read',
+      description: '读 Obsidian 库里的一篇笔记（正文全文）。'
+        + '路径用 obsidian_search 给出的那种相对路径（如 Wiki/Concepts/xxx.md）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '笔记路径，相对库根' },
+          vault: { type: 'string', description: '库名，默认当前活动库' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'obsidian_graph',
+      description: '查 Obsidian 知识库的关系图：某篇笔记的出链/反链，'
+        + '或者全库还有哪些「[[断链]]」（链接指向的概念还没有对应页面）。'
+        + '断链清单是知识库最常见的缺口——用这条能直接看到哪些概念缺页。',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '笔记路径；不给则查全库断链' },
+          vault: { type: 'string', description: '库名，默认当前活动库' },
+        },
+      },
+    },
+  },
 ]
 
 /**
@@ -1284,6 +1344,21 @@ function fail(what: string, result: { error?: string; stderr?: string }): string
   const detail = [result.error, result.stderr].filter(Boolean).join(' · ')
   const { safe } = privacyGate.redact(detail)
   return `(${what}${safe ? ": " + safe : ""})`
+}
+
+/**
+ * Obsidian 工具的失败回话。
+ *
+ * 与 `fail` 的区别：这里**不需要脱敏**（Obsidian 的错误信息里只有路径和文件名，
+ * 没有密钥形状的东西），但**必须说清是哪种失败**——最常见的那种是
+ * 「Obsidian 没在运行」，模型如果只看到"调用失败"就会如实说"查不到"，
+ * 而真实原因是用户没开 Obsidian。这条失败**有可行动的下一步**，别把它吞成一句空话。
+ */
+function obsidianFailText(result: { error?: string; needsRunning?: boolean }): string {
+  if (result.needsRunning) {
+    return '(Obsidian 没有在运行，无法查询它的知识库 —— 需要用户先打开 Obsidian 应用)'
+  }
+  return `(Obsidian 查询失败: ${result.error || '未知原因'})`
 }
 
 /**
@@ -2416,6 +2491,57 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         if (!scan.unreadable.length && !scan.conflicts.length && !warned.length) {
           lines.push('没有读不出来或撞名的技能。')
         }
+        return lines.join('\n')
+      }
+      case 'obsidian_search': {
+        const query = String(args.query || '').trim()
+        if (!query) return '(缺少 query 参数)'
+        const limit = boundedToolInteger(args.limit, 10, 30)
+        const vault = args.vault ? String(args.vault) : undefined
+        const result = searchVault(query, { vault, limit })
+        if (!result.success) return obsidianFailText(result)
+        const hits = result.data ?? []
+        if (!hits.length) {
+          // 说清是**这个库**里没搜到，别让它读成"什么都没找到"
+          return `(Obsidian 库里没有匹配「${query}」的笔记)`
+        }
+        return `在 Obsidian 库里找到 ${hits.length} 条匹配「${query}」:`
+          + '\n' + hits.map(hit => `· ${hit.path}`).join('\n')
+          + '\n\n（用 obsidian_read 读其中任意一篇的正文）'
+      }
+      case 'obsidian_read': {
+        const path = String(args.path || '').trim()
+        if (!path) return '(缺少 path 参数)'
+        const vault = args.vault ? String(args.vault) : undefined
+        const result = readNote(path, { vault })
+        if (!result.success || !result.data) return obsidianFailText(result)
+        return `${path}:\n${result.data.content}`
+      }
+      case 'obsidian_graph': {
+        const path = String(args.path || '').trim()
+        const vault = args.vault ? String(args.vault) : undefined
+        if (path) {
+          const outgoing = getOutgoingLinks(path, { vault })
+          const backlinks = getBacklinks(path, { vault })
+          if (!outgoing.success) return obsidianFailText(outgoing)
+          if (!backlinks.success) return obsidianFailText(backlinks)
+          const out = outgoing.data ?? []
+          const back = backlinks.data ?? []
+          const lines = [`${path} 的关系:`, `出链 ${out.length} 个:`]
+          for (const link of out) lines.push(`· → ${link.path}`)
+          lines.push(`反链 ${back.length} 个:`)
+          for (const link of back) lines.push(`· ← ${link.path}`)
+          return lines.join('\n')
+        }
+        const result = getUnresolvedLinks({ vault })
+        if (!result.success) return obsidianFailText(result)
+        const links = result.data ?? []
+        if (!links.length) return '(Obsidian 库里没有未解析链接，所有 [[链接]] 都有对应页面)'
+        // 断链最多给 40 条：再多是噪音，而这个回答是要进模型上下文的
+        const shown = links.slice(0, 40)
+        const lines = [`Obsidian 库里有 ${links.length} 个未解析链接（[[目标]] 存在但没有对应页面）:`]
+        for (const link of shown) lines.push(`· ${link.link}（${link.count ?? 1} 处）`)
+        if (links.length > shown.length) lines.push(`…还有 ${links.length - shown.length} 条`)
         return lines.join('\n')
       }
       case 'fetch_article': {

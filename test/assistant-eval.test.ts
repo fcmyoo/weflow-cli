@@ -122,6 +122,18 @@ test('用例表：回放只按脚本文件名给，且都得是 .py', () => {
   }
 })
 
+test('用例表：Obsidian 回放按子命令名给，键不能带参数', () => {
+  // 与上面那条同形：回放表是**按键**索引的（子命令名），不认参数。
+  // 键里混进 `query=xxx` 这样的参数，那条回放永远匹配不上——
+  // 而匹配不上时的行为是**抛错**，所以症状是"用例莫名失败"，很难一眼看出是键写错了。
+  for (const spec of EVAL_CASES) {
+    for (const name of Object.keys(spec.obsidian ?? {})) {
+      assert.doesNotMatch(name, /=/, `${spec.id} 的 Obsidian 回放键不该带参数：${name}`)
+      assert.ok(name.trim().length > 0, `${spec.id} 的 Obsidian 回放键不能为空`)
+    }
+  }
+})
+
 test('用例表：问句里不许出现真实会话名（合成数据是这套评测的前提）', () => {
   // 期望值里不写死名字，问句里也不该带——不然"合成数据"这个前提就漏了
   for (const spec of EVAL_CASES) {

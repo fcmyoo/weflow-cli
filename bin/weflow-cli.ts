@@ -47,6 +47,18 @@ import {
 } from '../src/services/pluginService.js'
 import { detectWechatClient, reportedDataDirs, samePath } from '../src/services/wechatClient.js'
 import { WECHAT_VERIFIED, compareWechatVersions, describeCompatVerdict, describeUnknownVersionReason } from '../src/services/wechatCompat.js'
+import {
+  checkAvailable,
+  getBacklinks,
+  getOutgoingLinks,
+  getUnresolvedLinks,
+  getVaultStats,
+  listConcepts,
+  listVaults,
+  readConcept,
+  readNote,
+  searchVault,
+} from '../src/services/obsidianService.js'
 
 const program = new Command()
 
@@ -2757,6 +2769,7 @@ program
   .option('--json', '输出机器可读的导出结果，不改变导出文件格式')
   .option('--non-interactive', '禁止交互选择；匹配不唯一时返回错误')
   .option('--full-images', '使用原图而非微信缓存缩略图（更清晰，但导出慢数倍）')
+  .option('--transcribe', '把未缓存的语音就地转写（云端 ASR，音频会出网；不加则只读缓存，未转写的显示 [语音 N″]）')
   .option('--media', 'json/txt/excel 导出时一并抽出图片与文档（落盘到 <输出>/<会话>_assets，并在导出物里给出相对路径）')
   .action(async (talkerInput: string, format: string, opts) => {
     const validFormats = ['json', 'txt', 'html', 'md', 'excel']
@@ -2837,7 +2850,7 @@ program
         result = await exportService.exportTxt(talker, opts.output, limit, from, to)
         break
       case 'html':
-        result = await exportService.exportHtml(talker, opts.output, limit, opts.date || '', from, to, !!opts.json, { fullImages: opts.fullImages === true })
+        result = await exportService.exportHtml(talker, opts.output, limit, opts.date || '', from, to, !!opts.json, { fullImages: opts.fullImages === true, transcribe: opts.transcribe === true })
         break
       case 'md':
         // markdown + 图片落盘（`<输出>/<talker>_assets/`）；json/txt/excel 之后会自动带上那些图。
@@ -4935,6 +4948,246 @@ program
           })
         })
     )
+
+  // ---- obsidian —— 直接操作用户自己的 Obsidian 知识库 ----
+  //
+  // 与 `wiki compile` 的分工：那一条**写**概念页（要调模型、要确认），这一条**读**
+  // 整个库（包括用户自己在 Obsidian 里加的页）。所以走的是 Obsidian 官方 CLI ——
+  // 它的索引是现成的，比自己扫目录快，也才知道哪些链接是断的。
+  //
+  // 三条硬约束（都是实测出来的，写在这里免得后来人重踩）：
+  //   1. Obsidian 必须**开着**。CLI 靠命名管道与运行中的 Obsidian 通信；没开时
+  //      CLI 客户端会退化成"启动一个新实例"，stdout 里只剩 Electron 启动日志。
+  //   2. Obsidian 的错误打在 **stdout** 且退出码是 **0**，所以不能只看退出码。
+  //   3. `vault=` 必须放在子命令**前面**，放后面会被静默忽略然后返回错库的��据。
+  const obsidianCmd = program
+    .command('obsidian')
+    .description('操作 Obsidian 知识库 — 检索/读取/图谱/统计（需要 Obsidian 在运行）')
+
+  /** Obsidian 调用失败时的统一出口：人类模式给一句能照做的话，JSON 模式给结构化错误。 */
+  const obsidianFail = (result: { error?: string; needsRunning?: boolean }, json?: boolean): never => {
+    const message = result.needsRunning
+      ? 'Obsidian 没有在运行 —— 请先打开 Obsidian（CLI 通过管道与运行中的 Obsidian 通信）'
+      : (result.error || 'Obsidian 调用失败')
+    if (json) {
+      console.log(JSON.stringify({ success: false, error: message, needsRunning: !!result.needsRunning }))
+    } else {
+      console.error(chalk.red(`✗ ${message}`))
+    }
+    process.exit(1)
+  }
+
+  // obsidian status
+  obsidianCmd
+    .command('status')
+    .description('检查 Obsidian 是否可用、当前库与库清单')
+    .option('--vault <name>', '目标库名（默认当前活动库）')
+    .option('--json', '输出机器可读结果')
+    .action(async (opts) => {
+      const availability = checkAvailable()
+      const vaults = listVaults({ vault: opts.vault })
+      const stats = opts.vault || opts.json ? getVaultStats({ vault: opts.vault }) : undefined
+      const payload = {
+        success: true,
+        installed: availability.installed,
+        executable: availability.executable,
+        vaults: vaults.success ? vaults.data : [],
+        stats: stats?.success ? stats.data : undefined,
+        error: stats && !stats.success ? stats.error : undefined,
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(payload))
+        return
+      }
+      if (!availability.installed) {
+        console.error(chalk.red('✗ 找不到 Obsidian —— 请先安装 Obsidian，或用 WEFLOW_OBSIDIAN_EXE 指定可执行文件路径'))
+        process.exit(1)
+      }
+      console.log(chalk.green('✓ Obsidian 可用'))
+      console.log(`  可执行文件: ${availability.executable}`)
+      for (const v of payload.vaults ?? []) {
+        console.log(`  库: ${v.name}  ${chalk.gray(v.path)}`)
+      }
+      if (payload.stats) {
+        console.log(chalk.gray(`  文件=${payload.stats.files}  标签=${payload.stats.tags}`
+          + `  未解析链接=${payload.stats.unresolved}  孤立页=${payload.stats.orphans}`))
+      }
+    })
+
+  // obsidian search
+  obsidianCmd
+    .command('search')
+    .description('在 Obsidian 库里全文搜索')
+    .argument('<query>', '搜索词')
+    .option('--vault <name>', '目标库名')
+    .option('--limit <n>', '最多返回多少条', '20')
+    .option('--path <folder>', '限定在某个文件夹内搜')
+    .option('--json', '输出 JSON 格式')
+    .action(async (query, opts) => {
+      const limit = parseCliInteger(opts.limit, 'limit', 1, 1000, opts.json)
+      const result = searchVault(query, { vault: opts.vault, limit, path: opts.path })
+      if (!result.success) return obsidianFail(result, opts.json)
+      const hits = result.data ?? []
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, query, count: hits.length, results: hits }))
+        return
+      }
+      if (!hits.length) {
+        console.log(chalk.yellow(`没有匹配「${query}」的笔记`))
+        return
+      }
+      console.log(chalk.cyan(`找到 ${hits.length} 条匹配「${query}」：`))
+      for (const hit of hits) console.log(`  ${hit.path}`)
+    })
+
+  // obsidian read
+  obsidianCmd
+    .command('read')
+    .description('读取一篇笔记的正文')
+    .argument('<path>', '笔记路径（相对库根，如 Wiki/Concepts/xxx.md）')
+    .option('--vault <name>', '目标库名')
+    .option('--json', '输出 JSON 格式')
+    .action(async (path, opts) => {
+      const result = readNote(path, { vault: opts.vault })
+      if (!result.success || !result.data) return obsidianFail(result, opts.json)
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, ...result.data }))
+        return
+      }
+      console.log(result.data.content)
+    })
+
+  // obsidian concept
+  obsidianCmd
+    .command('concept')
+    .description('读概念页：属性 + 大纲 + 摘要（未核验的会标出来）')
+    .argument('<name>', '概念名或笔记路径')
+    .option('--vault <name>', '目标库名')
+    .option('--json', '输出 JSON 格式')
+    .action(async (name, opts) => {
+      // 概念名 → 路径：先按「名」找，找不到就按路径找。
+      // 两条线都在候选里（文章线 Wiki/Concepts、聊天线 Chat/Concepts）。
+      const candidates = [`Wiki/Concepts/${name}.md`, `Chat/Concepts/${name}.md`, name]
+      let found: string | null = null
+      for (const candidate of candidates) {
+        const probe = readNote(candidate, { vault: opts.vault })
+        if (probe.success && probe.data?.content) { found = candidate; break }
+      }
+      if (!found) {
+        obsidianFail({ error: `库里没有找到概念「${name}」` }, opts.json)
+      }
+      const result = readConcept(found!, { vault: opts.vault })
+      if (!result.success || !result.data) return obsidianFail(result, opts.json)
+      const concept = result.data
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, ...concept }))
+        return
+      }
+      console.log(chalk.cyan(`# ${concept.title}`) + chalk.gray(`  ${concept.path}`))
+      if (concept.verified === false) {
+        console.log(chalk.yellow('⚠ 这一页由模型生成、未经人工核验 —— 当线索用，别当定论'))
+      }
+      if (concept.summary) console.log(`\n${concept.summary}`)
+    })
+
+  // obsidian graph
+  obsidianCmd
+    .command('graph')
+    .description('知识图谱：出链、反链、未解析链接（断链）')
+    .argument('[path]', '笔记路径；不给则列出全库未解析链接')
+    .option('--vault <name>', '目标库名')
+    .option('--limit <n>', '未解析链接最多列出多少条', '30')
+    .option('--json', '输出 JSON 格式')
+    .action(async (path, opts) => {
+      if (path) {
+        const outgoing = getOutgoingLinks(path, { vault: opts.vault })
+        const backlinks = getBacklinks(path, { vault: opts.vault })
+        if (!outgoing.success) return obsidianFail(outgoing, opts.json)
+        if (!backlinks.success) return obsidianFail(backlinks, opts.json)
+        const payload = {
+          success: true,
+          path,
+          outgoing: outgoing.data ?? [],
+          backlinks: backlinks.data ?? [],
+        }
+        if (opts.json) {
+          console.log(JSON.stringify(payload))
+          return
+        }
+        console.log(chalk.cyan(`${path}`))
+        console.log(`\n${chalk.bold('出链')} (${payload.outgoing.length})`)
+        for (const link of payload.outgoing) console.log(`  → ${link.path}`)
+        console.log(`\n${chalk.bold('反链')} (${payload.backlinks.length})`)
+        for (const link of payload.backlinks) console.log(`  ← ${link.path}`)
+        return
+      }
+
+      const limit = parseCliInteger(opts.limit, 'limit', 1, 500, opts.json)
+      const result = getUnresolvedLinks({ vault: opts.vault })
+      if (!result.success) obsidianFail(result, opts.json)
+      const links = result.data ?? []
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, count: links.length, unresolved: links }))
+        return
+      }
+      if (!links.length) {
+        console.log(chalk.green('✓ 没有未解析链接'))
+        return
+      }
+      console.log(chalk.yellow(`有 ${links.length} 个未解析链接（[[目标]] 存在但没有对应页面）：`))
+      for (const link of links.slice(0, limit)) {
+        console.log(`  ${link.link}  ${chalk.gray(`${link.count ?? 1} 处`)}`)
+      }
+      if (links.length > limit) {
+        console.log(chalk.gray(`  …还有 ${links.length - limit} 条，用 --limit 调整`))
+      }
+    })
+
+  // obsidian stats
+  obsidianCmd
+    .command('stats')
+    .description('知识库统计：文件数、标签、未解析链接、孤立页')
+    .option('--vault <name>', '目标库名')
+    .option('--json', '输出 JSON 格式')
+    .action(async (opts) => {
+      const result = getVaultStats({ vault: opts.vault })
+      if (!result.success || !result.data) return obsidianFail(result, opts.json)
+      const stats = result.data
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, ...stats }))
+        return
+      }
+      console.log(chalk.cyan(`库: ${stats.name ?? '(当前活动库)'}`))
+      if (stats.path) console.log(chalk.gray(`  ${stats.path}`))
+      console.log(`  文件 ${stats.files ?? '?'}  文件夹 ${stats.folders ?? '?'}  大小 ${stats.size ?? '?'}`)
+      console.log(`  标签 ${stats.tags ?? '?'}  未解析链接 ${stats.unresolved ?? '?'}`)
+      console.log(`  孤立页 ${stats.orphans ?? '?'}（没有入链）  死胡同 ${stats.deadends ?? '?'}（没有出链）`)
+    })
+
+  // obsidian concepts
+  obsidianCmd
+    .command('concepts')
+    .description('列出库里的概念页（含用户自己在 Obsidian 里加的）')
+    .option('--vault <name>', '目标库名')
+    .option('--limit <n>', '最多列出多少条', '50')
+    .option('--json', '输出 JSON 格式')
+    .action(async (opts) => {
+      const limit = parseCliInteger(opts.limit, 'limit', 1, 1000, opts.json)
+      const result = listConcepts({ vault: opts.vault })
+      if (!result.success) obsidianFail(result, opts.json)
+      const concepts = result.data ?? []
+      if (opts.json) {
+        console.log(JSON.stringify({ success: true, count: concepts.length, concepts }))
+        return
+      }
+      console.log(chalk.cyan(`共 ${concepts.length} 个概念页：`))
+      for (const concept of concepts.slice(0, limit)) {
+        console.log(`  ${concept.title}  ${chalk.gray(concept.path)}`)
+      }
+      if (concepts.length > limit) {
+        console.log(chalk.gray(`  …还有 ${concepts.length - limit} 个，用 --limit 调整`))
+      }
+    })
 
   // pipeline run
   program

@@ -17,6 +17,9 @@ export interface ExportResult {
   path?: string
   count?: number
   error?: string
+  /** true = Python 富导出失败后回退到了简版渲染器（无内嵌图片、无语音转写）。
+   *  2026-11-16 补：--json 模式连警告都吞，机器调用方只能从这里发现。 */
+  fallbackFromPython?: boolean
   /**
    * 抽取那一步给出的媒体摘要（状态计数、报告文件名、assets 目录）。
    *
@@ -153,7 +156,7 @@ export class ExportService {
     }
   }
 
-  async exportHtml(talker: string, outputDir: string, limit = 0, date = '', from?: number, to?: number, quiet = false, options: { fullImages?: boolean; format?: 'html' | 'md'; assetsOnly?: boolean } = {}): Promise<ExportResult> {
+  async exportHtml(talker: string, outputDir: string, limit = 0, date = '', from?: number, to?: number, quiet = false, options: { fullImages?: boolean; format?: 'html' | 'md'; assetsOnly?: boolean; transcribe?: boolean } = {}): Promise<ExportResult> {
     const format = options.format ?? 'html'
     if (format === 'md' && (from !== undefined || to !== undefined)) {
       // 不静默降级成「导出全部」：范围是调用方明确要的，做不到就说出来。
@@ -226,7 +229,12 @@ export class ExportService {
       const { stdout } = await execFileAsync(getPythonCommand(), args, {
         // Headroom for the opt-in --full-images path, which resizes hundreds
         // of multi-MB originals and can take several minutes.
-        timeout: 900_000,
+        //
+        // `--transcribe` 要**大得多**：识别是每条几秒的云端调用，一个几百条
+        // 语音的会话就要十几分钟。2026-11-16 实测：900 秒把转写中的 Python
+        // 进程掐死，TS 静默回退简版渲染器（不渲染语音转写），而 --json 连
+        // "已回退"都不打印——用户拿到"成功"的导出，语音全是空的。
+        timeout: options.transcribe ? 3_600_000 : 900_000,
         maxBuffer: 50 * 1024 * 1024,
         env: createPythonProcessEnv({
           WEFLOW_DB_PATH: db,
@@ -249,6 +257,9 @@ export class ExportService {
           // Off by default: originals are 5-24MB each and downscaling a few
           // hundred of them costs minutes in PIL.
           WEFLOW_FULL_IMAGES: options.fullImages ? '1' : undefined,
+          // 未缓存的语音就地转写（云端 ASR，音频出网）：渲染那条路只读缓存，
+          // 所以转写必须发生在渲染前——补完缓存，同一时间线上就是文字。
+          WEFLOW_EXPORT_TRANSCRIBE: options.transcribe ? '1' : undefined,
           WEFLOW_EXPORT_DATE: date || undefined,
           // Without this the Python path exported the entire history: `--limit`
           // only ever reached the fallback renderer, so a capped export of a
@@ -296,8 +307,15 @@ export class ExportService {
       // Fallback to basic HTML：**这条回退不带内嵌图片**，调用方得知道 ——
       // 2026-10-13 实测：Python 因一个 AttributeError 退出后，这里静默回退，
       // 而 CLI 照样打印「✓ 导出成功」，人只会以为导出正常。
+      //
+      // `--transcribe` 时**不回退**：简版渲染器不渲染语音转写，回退等于把
+      // 用户明确要的东西静默换成不要的。失败就失败，让调用方看见。
+      if (options.transcribe) {
+        return { success: false, error: `语音转写导出失败（未回退简版，避免丢掉转写）: ${failure}` }
+      }
       if (!quiet) console.error('  ⚠ 已回退到简版 HTML（不含内嵌图片）')
-      return this.exportHtmlBasic(talker, outputDir, limit, from, to)
+      const basic = await this.exportHtmlBasic(talker, outputDir, limit, from, to)
+      return { ...basic, fallbackFromPython: true }
     }
   }
 

@@ -132,6 +132,9 @@ client-local config that is not in version control.
 | `wechat.check_skills` | Report skill problems: unreadable frontmatter, cross-directory collisions, non-conforming ids, disabled skills. | Skill directories (`skillDirs` config) |
 | `wechat.list_contacts` | List contact names from the local address book. **Names only** - no `wxid`, alias or other local identifiers. | Decrypted WeChat database |
 | `wechat.lint_wiki` | Knowledge-base health check: broken links, orphan pages, empty pages, duplicate titles. Read-only; changes nothing. | Vault Wiki output |
+| `wechat.obsidian_search` | Full-text search inside the user's **Obsidian** vault. Unlike `search_knowledge`, this goes through Obsidian's own index, so notes the user wrote by hand are searchable too. | Obsidian **running** |
+| `wechat.obsidian_read` | Read one note from the Obsidian vault (full body). | Obsidian **running** |
+| `wechat.obsidian_graph` | Vault relations: a note's outgoing/backlinks, or every unresolved `[[link]]` in the vault. | Obsidian **running** |
 
 This table lists the tools shipped today; `weflow-cli mcp-config` prints the authoritative list for the
 installed version. **`wechat.look_at_image` is deliberately not on it**: that tool works by handing the image to

@@ -51,7 +51,9 @@ def require_sqlcipher():
     try:
         from sqlcipher3 import dbapi2 as _sqlcipher
     except ImportError:
-        raise RuntimeError('需要 sqlcipher3: pip install sqlcipher3')
+        raise RuntimeError('需要 sqlcipher3。多半是用错了 Python：项目依赖装在自管 venv 里，'
+                           '请用 ~/.weflow-cli/venv/Scripts/python.exe 跑本脚本（或走 weflow-cli 命令）。'
+                           '确认解释器对了仍缺，再 pip install sqlcipher3。')
     sqlcipher = _sqlcipher
     return sqlcipher
 

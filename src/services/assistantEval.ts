@@ -83,6 +83,18 @@ export interface EvalCase {
    * **跑完必须还原**——不还原的话下一条用例会读到上一条的目录，而这种串味是静默的。
    */
   env?: Record<string, string>
+  /**
+   * 这一条用例要回放的 **Obsidian CLI** 输出。
+   *
+   * 键是子命令名（`search` / `read` / `unresolved` …），值是该命令的 stdout。
+   * **不铺这个的话，`obsidian_*` 工具在评测里会真的去调本机的 Obsidian**——
+   * 那台机器上装了 Obsidian 就真出机了（评测的纪律是「只许调模型」），
+   * 没装就恒为空，于是用例既不报错也测不到东西。
+   *
+   * 与 `scripts` 那张表同形：**按键回放，不认参数**。所以一条用例里同一个命令
+   * 只能回放一份输出——要区分「先搜后读」得用两个不同的命令名。
+   */
+  obsidian?: Record<string, { stdout?: string; stderr?: string; code?: number }>
   expect: {
     /** 至少要调用这些工具 */
     mustCall?: string[]
@@ -487,6 +499,44 @@ export const EVAL_CASES: EvalCase[] = [
   },
   // ------------------------------------- 2026-10-01 补：盘完 31 个工具后剩下的那几条
   {
+    id: 'obsidian-search',
+    // 走 **Obsidian 自己的索引**的那条路（与 `search_knowledge` 互补）：
+    // `search_knowledge` 只看 weflow-cli 编译出来的概念页，这条能看到用户手写的笔记。
+    //
+    // 回放表按**子命令名**索引（`search`），不认参数 —— 所以一条用例只能回放一份 search 输出。
+    question: '在我的 Obsidian 笔记里找一下提到"蓝色陶瓷"的那些笔记。',
+    obsidian: {
+      search: { stdout: '["我的笔记/蓝色陶瓷.md","日记/2026-03-05.md"]' },
+    },
+    expect: { mustCall: ['obsidian_search'], maxTools: 6, toolBudget: 3,
+              answerShouldMatch: /蓝色陶瓷/ },
+  },
+  {
+    id: 'obsidian-read',
+    // 读完一篇笔记的**正文**。正文里那四个字是断言的依据 ——
+    // 模型答得出来即说明这条路真的把内容取回来了，不是只报了个路径。
+    question: '把我 Obsidian 里那篇《蓝色陶瓷》笔记的正文读出来。',
+    obsidian: {
+      search: { stdout: '["我的笔记/蓝色陶瓷.md"]' },
+      read: { stdout: '# 蓝色陶瓷\n\n这是一次窑变的记录，烧到 1280 度才成了那个青灰色。' },
+    },
+    expect: { mustCall: ['obsidian_read'], maxTools: 6, toolBudget: 3,
+              answerShouldMatch: /窑变|1280/ },
+  },
+  {
+    id: 'obsidian-graph',
+    // 断链是知识库最常见的缺口（`[[目标]]` 有链接但没有对应页面）。
+    // 这条问的是**全库断链**，所以回放的是 `unresolved` 那条命令。
+    question: '我的 Obsidian 库里有哪些链接是断的？',
+    obsidian: {
+      unresolved: { stdout: JSON.stringify([
+        { link: '蓝色陶瓷', count: '2', sources: '我的笔记/蓝色陶瓷.md, 日记/2026-03-05.md' },
+      ]) },
+    },
+    expect: { mustCall: ['obsidian_graph'], maxTools: 6, toolBudget: 3,
+              answerShouldMatch: /蓝色陶瓷/ },
+  },
+  {
     id: 'sns-timeline',
     // 朋友圈那条路此前**一条断言都没有**，而它的桩写死空列表 —— 能测到的只有"暂无缓存数据"，
     // 与它当初抱怨 `list_contacts` 的毛病一样：数据是假的，用例就碰不到真分支。桩改成按用例给，
@@ -840,6 +890,23 @@ export async function installStubs(spec: EvalCase): Promise<() => void> {
     return { stdout: canned.stdout ?? '', stderr: canned.stderr ?? '', code: canned.code ?? 0 }
   })
 
+  // **Obsidian CLI 也要打桩**，理由与上面那条同形：不铺的话 `obsidian_*` 工具会真的去调
+  // 本机的 Obsidian —— 那台机器装了 Obsidian 就是**真出机**（评测的纪律是「只许调模型」），
+  // 没装就恒为空，于是用例既不报错也测不到东西。两条都是「静默地测错」。
+  //
+  // 回放表按**子命令名**索引（`search` / `read` / `unresolved` …），不认参数——
+  // 与 `scripts` 那张表同一形状的简化。一条用例里同一个命令只能回放一份输出。
+  const obsidian = await import('./obsidianCli.js')
+  obsidian.setObsidianExec((_exe: string, args: string[]) => {
+    const command = args.find(arg => !arg.includes('=')) ?? ''
+    const canned = spec.obsidian?.[command]
+    if (!canned) {
+      // 没准备的命令一律**报错**，不静默返回空：那会让"模型选了错的命令"看起来像成功。
+      throw new Error(`评测没有给 Obsidian 的 ${command} 准备回放：这条用例不该走到它`)
+    }
+    return { stdout: canned.stdout ?? '', stderr: canned.stderr ?? '', code: canned.code ?? 0 }
+  })
+
   // 只许调模型。别的出网一律拒掉——评测里出现第二个出口就说明有地方漏了。
   globalThis.fetch = (async (url: any, init: any) => {
     const target = String(url)
@@ -871,6 +938,7 @@ export async function installStubs(spec: EvalCase): Promise<() => void> {
     weread.search = saved.search
     globalThis.fetch = saved.fetch
     bridge.setScriptRunner(null)
+    obsidian.setObsidianExec(null)
   }
 }
 

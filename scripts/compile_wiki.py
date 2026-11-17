@@ -678,7 +678,7 @@ def all_card_dirs(card_dirs=None) -> list:
 
 
 def iter_source_links(text: str) -> list:
-    """读出「来源」段里每一行的名字。**宽容读取**，因为 `SOURCE_LINK_RE` 读不全。
+    r"""读出「来源」段里每一行的名字。**宽容读取**，因为 `SOURCE_LINK_RE` 读不全。
 
     实测库里 7,061 条来源行里有 20 条它匹配不到，全是标题里带方括号的
     （`- [[2026-03-05-[TGRS]利用…]] — …`）：那个正则的 `[^\]]+` 在第一个 `]`
@@ -1303,7 +1303,11 @@ def main():
             print('  例:', '、'.join(result['sample'][:3]))
         return
 
-    api_key = args.api_key or os.environ.get('DEEPSEEK_API_KEY', '')
+    # key 的三级解析：argv → 环境变量 → **配置**。2026-11-16 实测漏了第三级——
+    # chat-notes 明明让用户"接着跑 compile_wiki"，而 key 在配置里（正常装法），
+    # 这条路径却报"需要 DeepSeek API key"。与下面 build_dangling_pages 分支看齐。
+    api_key = (args.api_key or os.environ.get('DEEPSEEK_API_KEY', '')
+               or get_api_key(load_config()))
     if not api_key:
         print('[ERROR] 需要 DeepSeek API key')
         sys.exit(1)

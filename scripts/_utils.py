@@ -1083,8 +1083,15 @@ def get_dashscope_key(config=None) -> str:
     try:
         return decrypt_lock(config.get('dashscopeApiKey', ''))
     except Exception as exc:
-        warn_once('dashscopeApiKey', '配置项 dashscopeApiKey 解不开（%s: %s）—— 当作"没配"，语义检索会退成关键词'
-                  % (type(exc).__name__, exc))
+        # 缺 cryptography 时最常见的原因不是"没配 key"，而是**用错了 Python**：
+        # 项目把依赖装在自管 venv 里，直接用系统 python 跑脚本就会解不开密文、
+        # 静默退化成关键词检索（实测踩过）。把这条出路写进告警，别让人以为是 key 坏了。
+        hint = ''
+        if isinstance(exc, ModuleNotFoundError):
+            hint = ('；多半是用错了 Python——请用项目自管 venv 跑：'
+                    '~/.weflow-cli/venv/Scripts/python.exe（或走 weflow-cli 命令，它自动选对解释器）')
+        warn_once('dashscopeApiKey', '配置项 dashscopeApiKey 解不开（%s: %s）—— 当作"没配"，语义检索会退成关键词%s'
+                  % (type(exc).__name__, exc, hint))
         return ''
 
 

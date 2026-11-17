@@ -612,6 +612,37 @@ weflow-cli wiki compile --source ./output/user-notes --min-refs 1 --yes
   不动别的，也不动 frontmatter；
 - **它们是线索不是定论**：每页 frontmatter 里 `verified: false`，表示**未经人工核验**。
 
+### 直接从命令行查 Obsidian 库（`obsidian` 命令组）
+
+```powershell
+weflow-cli obsidian status                    # Obsidian 装没装、有哪些库、当前库统计
+weflow-cli obsidian search 插件 --limit 10     # 全文搜索（走 Obsidian 自己的索引）
+weflow-cli obsidian read "Wiki/Concepts/xxx.md" # 读一篇笔记的正文
+weflow-cli obsidian concept 重装插件           # 读概念页：属性 + 摘要 + 大纲
+weflow-cli obsidian graph                     # 全库断链（[[目标]] 有链接但没有对应页面）
+weflow-cli obsidian graph "Wiki/Concepts/xxx.md" # 某篇的出链 / 反链
+weflow-cli obsidian stats                     # 文件数、标签、未解析链接、孤立页
+weflow-cli obsidian concepts                  # 列出所有概念页
+```
+
+每条都支持 `--json`（机器可读）与 `--vault <name>`（指定库）。
+
+- **它与 `wiki compile` 的分工**：那条**写**概念页（要调模型、要确认），这一条**读**整个库——
+  包括**你自己在 Obsidian 里手写的笔记**。所以问「我笔记里写过什么」用 `obsidian search`，
+  问「知识库里有哪些概念」用 `wiki compile` 那条线。
+- **它与 `vault search` 的分工**：`vault search` 读的是 weflow-cli 自己产出的卡片与概念页
+  （按线分开、能带相关度排序），`obsidian search` 走 Obsidian 的索引（快、覆盖手写笔记、
+  但不区分文章线与聊天线）。
+- **必须开着 Obsidian**：CLI 通过命名管道与运行中的 Obsidian 通信。没开时它会退化成
+  「启动一个新实例」，命令结果根本收不到——本仓会识别这个特征并报
+  「Obsidian 没有在运行」，而不是给你一份空结果。
+- **Obsidian 的错误走 stdout、退出码是 0**：`read` 一个不存在的文件会打印
+  `Error: File "X" not found.` 但退出码仍是 0。weflow-cli 认得这个 `Error:` 前缀，
+  不会把它当成笔记正文。
+
+**已知限制**：`search:context`（带上下文的搜索）在 Obsidian 1.15.1 上会直接崩溃（退出码 -1、
+无输出），所以没有转发它——转发只会拿到空结果，让人误以为「库里没有」。
+
 ## 知识库体检（本地，不联网）
 
 ```powershell
@@ -851,7 +882,18 @@ recall@10 = 1.00、hit@1 = 0.80（**这是门控融合开了之后的数**，纯
 
 HTML 里放不出语音：微信语音是 **SILK v3** 格式，浏览器不支持，ffmpeg 也没有 SILK 解码器（只有 AMR）。所以语音转文字是让语音消息在导出里能携带信息的唯一办法。
 
-**它是独立的、可断点续跑的一步，不在导出过程里。** 导出只读转写缓存；缓存没有的语音显示为 `[语音 6″]`。这样可以随时跑、随时停，跑过一遍就永久命中（按语音内容的 md5 缓存，同一条语音被转发到别处也只识别一次）。
+**转写是独立、可断点续跑的一步，缓存按语音内容的 md5 寻址**（同一条语音被转发到别处也只识别一次）。跑过一遍就永久命中，之后任何导出/出卡都直接读缓存，不再花钱、不再等待。有两条入口：
+
+```powershell
+# 入口一：导出时就地转写（2026-11-16 起）——未缓存的语音先转写，再渲染
+weflow-cli export "群名" html --transcribe
+# 入口二：只跑转写不出卡片（chat-notes 出卡时会自动补）
+python scripts/wechat_voice.py --db <message_0.db> --key <key> --salt <salt> --passphrase <pw> --talker "<会话id>" --cache-dir "output\.voice-cache"
+```
+
+**不加 `--transcribe` 时导出只读缓存**：没转写过的语音显示为 `[语音 6″]` 占位符——导出的主用途（翻阅/归档/分享）大多不需要转写，而识别要出网、要花钱，所以默认关。加了之后，转写发生在任何一条消息渲染之前，因此文字出现在**同一时间线的原位置**（不重排消息）；日志依次报 `Voice: N clip(s), M transcribed` → `Transcribed: X new...`。
+
+**注意转写范围是整个会话的语音**（不只是导出窗口内的）：缓存的设计是"补满一次，处处复用"，所以 `--limit 50` 也会把这个会话的全部未缓存语音转掉。日志第一行就报得出总数，转写开始前看得见。
 
 **三条转写路，默认自动选**（`--engine auto|minimax|dashscope|local`）：
 
@@ -1818,6 +1860,10 @@ weflow-cli skill check             # 体检：读不出来的、跨目录同名�
 - **通讯录**：「我有哪些联系人」——只给名字，**不给 wxid**
 - **学习回顾 / 知识库体检 / 技能体检**：`get_review`、`lint_wiki`、`check_skills`
 - **把待办标记完成**：「交季度报表那条做完了」——它能改状态，**不能删待办**；指代不清（重名）时它会拒绝而不是猜
+- **查你的 Obsidian 库**：`obsidian_search` / `obsidian_read` / `obsidian_graph`——
+  「我笔记里写过什么」「我库里有哪些断链」这类问题走这条。它走 **Obsidian 自己的索引**，
+  所以**你自己手写的笔记也能搜到**（`search_knowledge` 只看 weflow-cli 编译出来的概念页）。
+  **前提是 Obsidian 开着**：没开时它会明说「Obsidian 没有在运行」，而不是给你一份空结果。
 
 两条边界要记住：
 

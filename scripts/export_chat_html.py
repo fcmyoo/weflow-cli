@@ -1497,6 +1497,46 @@ def image_is_blank(b64_data, threshold=0.985):
         return False
 
 
+def init_voice_state(args, log=print):
+    """装载语音负载与转写缓存；`--transcribe` 时先把缓存补满。
+
+    为什么转写放在这里（渲染之前）：`render_voice` **只读缓存**——缓存在，
+    渲染出来就是时间线上的文字；不在，就是 `[语音 N″]` 占位符。所以"转写 +
+    同一时间线"的关键是转写发生在任何一条消息被渲染之前，消息本身不用重排。
+
+    默认不转写：识别要出网、要花钱，而导出的主用途（翻阅/归档/分享）大多
+    不需要它。`--transcribe` 是显式开关。key 从配置解密（与 chat-notes 同一条
+    路），不进 argv——进程表里不该出现密钥。
+
+    缓存的家由 `wechat_voice` 定义：以前这里按 `--out` 拼，于是同一段音频在
+    不同输出目录下会被各转写一遍，而卡片那条线读的又是另一处（2026-10-01）。
+    """
+    global VOICE_STATE
+    VOICE_STATE['cache'] = wechat_voice.TranscriptCache(wechat_voice.DEFAULT_CACHE_DIR)
+    try:
+        VOICE_STATE['map'] = wechat_voice.load_voice_map(
+            args.db, args.key, args.salt, args.passphrase, args.talker)
+    except Exception:
+        VOICE_STATE['map'] = {}
+    if not VOICE_STATE['map']:
+        return
+    if getattr(args, 'transcribe', False):
+        from _utils import get_dashscope_key, get_minimax_key, load_config
+        config = load_config()
+        processed, already, failed = wechat_voice.ensure_transcripts(
+            VOICE_STATE['map'], wechat_voice.DEFAULT_CACHE_DIR,
+            engine='auto',
+            minimax_key=get_minimax_key(config),
+            dashscope_key=get_dashscope_key(config),
+            log=lambda line: log('  ' + line))
+        log(f"Transcribed: {processed} new, {already} cached, {failed} failed")
+    done = sum(
+        1 for blob in VOICE_STATE['map'].values()
+        if wechat_voice.lookup_transcript(VOICE_STATE['cache'], blob)[0] is not None
+    )
+    log(f"Voice: {len(VOICE_STATE['map'])} clip(s), {done} transcribed")
+
+
 def render_voice(local_id, content):
     """`[语音 6″]` plus its transcript when one has been cached.
 
@@ -2764,6 +2804,10 @@ def main():
     parser.add_argument('--contact-db', default=os.environ.get('WEFLOW_CONTACT_DB_PATH', ''), help='Contact database, for resolving group senders to names')
     parser.add_argument('--contact-key', default=os.environ.get('WEFLOW_CONTACT_KEY', ''), help='Contact database key hex')
     parser.add_argument('--contact-salt', default=os.environ.get('WEFLOW_CONTACT_SALT', ''), help='Contact database salt hex')
+    parser.add_argument('--transcribe', action='store_true',
+                        default=bool(os.environ.get('WEFLOW_EXPORT_TRANSCRIBE')),
+                        help='把没有缓存的语音就地转写后再导出（云端 ASR，音频会出网；'
+                             '不加则只读缓存，未转写的语音显示为 [语音 N″] 占位符）')
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -2832,20 +2876,7 @@ def main():
     # Voice: load the payloads so a cached transcript can be shown. Anything
     # not yet transcribed simply renders as `[语音 N″]`.
     if _WECHAT_VOICE:
-        # 缓存的家由 `wechat_voice` 定义：以前这里按 `--out` 拼，于是同一段音频在不同
-        # 输出目录下会被各转写一遍，而卡片那条线读的又是另一处（2026-10-01）。
-        VOICE_STATE['cache'] = wechat_voice.TranscriptCache(wechat_voice.DEFAULT_CACHE_DIR)
-        try:
-            VOICE_STATE['map'] = wechat_voice.load_voice_map(
-                args.db, args.key, args.salt, args.passphrase, args.talker)
-        except Exception:
-            VOICE_STATE['map'] = {}
-        if VOICE_STATE['map']:
-            done = sum(
-                1 for blob in VOICE_STATE['map'].values()
-                if wechat_voice.lookup_transcript(VOICE_STATE['cache'], blob)[0] is not None
-            )
-            print(f"Voice: {len(VOICE_STATE['map'])} clip(s), {done} transcribed")
+        init_voice_state(args)
 
     # The caller resolves the display name from the session list, which only
     # covers recent conversations. A less recent chat therefore exported as
